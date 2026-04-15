@@ -70,20 +70,8 @@ class ValidationResponse(BaseModel):
 
 
 class ATSKeywordPlan(BaseModel):
-    title_keywords_to_use: List[str] = Field(default_factory=list)
-    hard_skills_to_use: List[str] = Field(default_factory=list)
-    soft_skills_to_use: List[str] = Field(default_factory=list)
-    exact_keywords_to_use: List[str] = Field(default_factory=list)
-    keyword_variants: List[str] = Field(default_factory=list)
-    prioritized_requirements: List[str] = Field(default_factory=list)
-    evidence_from_resume: List[str] = Field(default_factory=list)
-    missing_keywords_not_supported_by_resume: List[str] = Field(default_factory=list)
-    missing_hard_skills_not_supported: List[str] = Field(default_factory=list)
-    missing_soft_skills_not_supported: List[str] = Field(default_factory=list)
-    summary_focus: List[str] = Field(default_factory=list)
-    experience_focus: List[str] = Field(default_factory=list)
-    project_focus: List[str] = Field(default_factory=list)
-    skills_focus: List[str] = Field(default_factory=list)
+    hard_skills: List[str] = Field(default_factory=list)
+    soft_skills: List[str] = Field(default_factory=list)
 
 
 class ATSResumeRewriteOutput(BaseModel):

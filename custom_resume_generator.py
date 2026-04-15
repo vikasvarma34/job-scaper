@@ -9,6 +9,7 @@ import pdf_generator
 import re
 import asyncio 
 import math
+import resume_validator
 from llm_client import primary_client
 from models import (
     Resume, SummaryOutput, SkillsOutput, SingleExperienceOutput,
@@ -21,6 +22,18 @@ import os
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 RESUME_GENERATION_TEMPERATURE = 0.6
+
+
+def _log_keyword_plan_response(job_id: Any, llm_output: str) -> None:
+    """
+    Log the raw first-step planner response so keyword selection is easy to inspect.
+    """
+    pretty_output = str(llm_output or "").strip()
+    try:
+        pretty_output = json.dumps(json.loads(pretty_output), indent=2, ensure_ascii=False)
+    except Exception:
+        pass
+    logging.info("ATS keyword plan response for job_id %s:\n%s", job_id, pretty_output)
 
 def _sanitize_filename_token(value: Any, default: str = "UNKNOWN") -> str:
     """
@@ -116,16 +129,6 @@ def _paragraphize_summary(text: str) -> str:
     return " ".join(parts) if parts else str(text).strip()
 
 
-def _limit_bullet_lines(text: str, max_lines: int) -> str:
-    """
-    Keep only the first N meaningful newline-separated lines.
-    """
-    if not text or "\n" not in text:
-        return text
-    parts = [part.strip() for part in str(text).splitlines() if part.strip()]
-    return "\n".join(parts[:max_lines]) if parts else str(text).strip()
-
-
 def _normalize_skills_output(base_skills: list[str], rewritten_skills: list[str]) -> list[str]:
     """
     Prefer grouped skill lines when the base resume already uses grouped categories.
@@ -206,7 +209,8 @@ def _normalize_personalized_resume_output(
     personalized_resume: Resume,
 ) -> Resume:
     """
-    Enforce the final output shape even if the model drifts from formatting instructions.
+    Enforce the final output shape even if the model drifts from formatting
+    instructions, without manually clipping bullet counts.
     """
     normalized_resume = personalized_resume.model_copy(deep=True)
     normalized_resume.summary = _paragraphize_summary(normalized_resume.summary)
@@ -215,69 +219,48 @@ def _normalize_personalized_resume_output(
         normalized_resume.skills,
     )
 
-    for exp in normalized_resume.experience:
-        exp.description = _limit_bullet_lines(exp.description, max_lines=5)
-
-    for proj in normalized_resume.projects:
-        proj.description = _limit_bullet_lines(proj.description, max_lines=4)
-
     return normalized_resume
 
 
 async def generate_keyword_plan_with_llm(
-    full_resume: Resume,
     job_details: Dict[str, Any],
 ) -> ATSKeywordPlan:
     """
-    First step of the new AI flow: ask the LLM to return the important ATS keywords
-    and targeting plan using only the provided resume and job data.
+    First step of the new AI flow: extract the important hard and soft skills
+    from the job description only.
     """
     prompt = f"""
-    Build a keyword strategy for tailoring this software engineering resume to the target job.
+    Extract the important resume keywords from this target software engineering job.
 
     Target job:
     {_serialize_job_for_prompt(job_details)}
 
-    Base resume:
-    {_serialize_resume_for_prompt(full_resume)}
+    Return only two arrays:
+    - hard_skills: technical skills, tools, technologies, frameworks, platforms, databases, APIs, testing keywords, and engineering-method keywords from the job description
+    - soft_skills: communication, collaboration, ownership, problem-solving, teamwork, adaptability, and similar people/process skills from the job description
 
-    Goal:
-    Create a practical ATS keyword plan that improves match quality while staying fully grounded in the resume.
-
-    What to do:
-    1. Identify the target role family and likely emphasis of the job (for example: backend, full stack, platform, API/integration-heavy, product engineering, cloud-focused).
-    2. Extract the most important job requirements and keywords.
-    3. For each important keyword or requirement, classify it as:
-       - supported: clearly supported by the resume
-       - adjacent: not directly stated, but reasonably supported by closely related evidence in the resume
-       - unsupported: requested by the job but not supported by the resume
-    4. Rank supported and adjacent keywords by importance for ATS and recruiter screening.
-    5. Build a section-level placement plan so the strongest supported keywords are distributed naturally across summary, skills, experience, and projects instead of being clustered in one place.
-    6. Identify lower-signal or less relevant resume content that should be de-emphasized for this job.
-    7. Create brief writing guidance for the rewriter so the final resume sounds like a strong real software engineering resume, not a keyword-stuffed rewrite.
-
-    Important constraints:
-    - Stay factually grounded in the base resume.
-    - Do not recommend claiming unsupported tools, domains, achievements, or responsibilities.
-    - Favor keywords that are both important to the job and defensible from the resume.
-    - Use software-engineering judgment, not generic resume advice.
-    - Keep the plan compact, useful, and production-friendly.
+    Rules:
+    - Use only the job description.
+    - Do not compare against the resume.
+    - Do not explain anything.
+    - Do not add extra fields.
+    - Keep the lists concise, useful, and ATS-friendly.
+    - Prefer exact or near-exact job wording where helpful.
+    - Remove obvious duplicates.
     """
 
     system_prompt = """
     You are a senior resume-targeting strategist for software engineering resumes and a precise JSON generator.
 
-    Your task is to convert a target job description and a base resume into an evidence-based keyword strategy that will guide resume rewriting.
+    Your task is to convert a target job description into two keyword lists for resume rewriting.
 
     Rules:
     - Return exactly one valid JSON object matching the required schema.
     - Do not output markdown, commentary, or extra text.
-    - Use only information present in the provided job details and base resume.
-    - Treat the base resume as the source of truth for candidate facts.
+    - Use only information present in the provided job details.
     - Treat the job details as the source of truth for target requirements.
-    - Do not invent skills, experience, achievements, tools, domains, or seniority.
-    - Optimize specifically for software engineering, backend, platform, and full-stack resume targeting.
-    - Prefer exact job-description wording only when it is truthfully supported by the resume.
+    - Optimize specifically for software engineering, backend, platform, and full-stack job descriptions.
+    - Return only hard_skills and soft_skills.
     - Reason privately and output only the final JSON.
     """
 
@@ -287,6 +270,7 @@ async def generate_keyword_plan_with_llm(
         temperature=RESUME_GENERATION_TEMPERATURE,
         response_format=ATSKeywordPlan,
     )
+    _log_keyword_plan_response(job_id=job_details.get("job_id"), llm_output=llm_output)
     return ATSKeywordPlan.model_validate_json(llm_output)
 
 
@@ -319,64 +303,86 @@ async def rewrite_resume_with_keyword_plan(
     Target job:
     {_serialize_job_for_prompt(job_details)}
 
-    ATS keyword plan:
+    Important hard and soft skills found in the first pass:
     {json.dumps(keyword_plan.model_dump(), indent=2)}
 
     Base resume:
     {_serialize_resume_for_prompt(full_resume)}
 
     Primary objective:
-    Produce a stronger, more relevant, ATS-friendly software engineering resume that stays fully truthful to the base resume.
+    Produce a stronger, more relevant, ATS-friendly software engineering resume that improves match quality for this job.
 
     Order of priority:
-    1. factual accuracy
-    2. role relevance
+    1. role relevance and ATS match for the target job
+    2. use the first-pass hard_skills and soft_skills throughout the resume in a natural, useful way
     3. clarity and strength of writing
-    4. natural keyword coverage
+    4. factual consistency for concrete experience details
     5. concision
 
     Rewrite instructions:
 
     General
-    - Treat the base resume as the factual source of truth.
-    - Use the keyword plan to guide emphasis, phrasing, keyword placement, and trimming decisions.
+    - Treat the base resume as the source of truth for concrete employment history, project history, dates, titles, companies, and measurable outcomes already written there.
+    - Treat the first-pass hard_skills and soft_skills as user-verified skills that are allowed to be used in the rewrite, even if some of them are not explicitly written in the current base resume wording.
+    - Use the first-pass hard_skills and soft_skills as active keyword guidance while rewriting.
+    - Do not ignore high-value hard_skills from the first pass. Use them where they improve ATS match and role relevance.
+    - Do not ignore soft_skills from the first pass. Reflect them naturally in summary and bullet wording.
     - Substantially improve wording, relevance, and clarity where needed.
     - Do not mirror the base resume mechanically.
     - Do not fabricate companies, titles, dates, projects, technologies, scope, ownership, or achievements.
-    - Do not force unsupported keywords into the resume.
-    - If the job asks for something unsupported, emphasize the closest supported strengths instead.
+    - Do not spend effort deciding whether the candidate can do the job.
+    - Use the job keywords naturally and uniformly across the resume without obvious stuffing.
+    - Do not force every keyword into every section.
+    - If an important hard skill from the first pass is missing from the current wording, prefer to incorporate it into the summary or skills section before dropping it entirely.
+    - The resume should visibly reflect the first-pass keyword list, not just vaguely align with it.
 
     Summary
     - Write the professional summary as one concise paragraph.
     - It should sound like a strong software engineering candidate, not a generic profile.
-    - Include role fit, core technical strengths, and business or engineering impact where supported.
+    - Include role fit, core technical strengths, and business or engineering impact when evidenced by the base resume.
+    - Use several of the highest-value hard_skills in the summary when that improves ATS match and readability.
+    - Use soft_skills in a natural way, such as collaboration, problem-solving, communication, ownership, or cross-functional delivery.
+    - You may mention user-verified first-pass skills in the summary even when they are not explicitly stated in the current base resume wording.
     - Keep it tight and readable.
 
     Skills
     - Present skills in meaningful grouped categories, not as one long flat list.
-    - Keep the skills section broad enough for ATS, but focused on the strongest supported technologies, platforms, and engineering practices for the role.
+    - The skills section must contain technical skills only: languages, frameworks, libraries, platforms, databases, APIs, testing tools, cloud/devops tools, and engineering methodologies/patterns.
+    - Do not place soft skills in the skills section. Do not add categories like "Soft Skills", "Interpersonal Skills", or similar.
+    - Use soft_skills in the professional summary and in experience/project wording instead, by showing collaboration, ownership, communication, problem-solving, or cross-functional work through natural sentences.
+    - Treat the skills section as the primary place to cover first-pass hard_skills.
+    - Keep the skills section broad enough for ATS, but focused on the strongest relevant technologies, platforms, and engineering practices for the target job.
+    - Prefer to include important first-pass hard_skills in the skills section even if the current base wording under-emphasizes them, because those first-pass skills are user-verified.
     - Remove weak, redundant, or low-signal items when they dilute relevance.
 
     Experience
     - Keep the same number and order of experience items.
     - Keep each item's job_title, company, location, start_date, and end_date unchanged.
-    - For each role, write 4-6 strong bullet-ready lines.
+    - For each role, write exactly 5 strong bullet-ready lines.
     - Each bullet should aim to communicate some combination of action, scope, technical stack, and result.
     - Prefer specific, meaningful bullets over generic responsibility statements.
-    - Use metrics only when explicitly supported by the base resume.
+    - Use metrics only when evidenced by the base resume.
     - De-emphasize weaker or less relevant details if stronger material exists.
+    - Use hard_skills from the first pass when they fit naturally with the role and improve ATS match.
+    - Use soft_skills from the first pass by showing communication, collaboration, ownership, problem-solving, debugging, or cross-functional execution through the bullet wording.
+    - Do not invent fake experience claims. If a first-pass skill is user-verified but not clearly tied to a specific job bullet in the base resume, prefer to surface it in the summary or skills section instead of attaching it to a fabricated work claim.
 
     Projects
     - Keep the same number and order of project items.
     - Keep each project's name and link unchanged.
-    - For each project, write 3-5 strong bullet-ready lines.
-    - Highlight the most relevant engineering work, architecture, implementation, integrations, and outcomes supported by the base resume.
-    - You may refine each project's technologies list by removing weaker or less relevant supported items.
+    - For each project, write 4 to 5 strong bullet-ready lines.
+    - Highlight the most relevant engineering work, architecture, implementation, integrations, and outcomes evidenced by the base resume.
+    - You may refine each project's technologies list by removing weaker or less relevant items already present in the base resume.
+    - Use hard_skills from the first pass when they fit naturally with the project and improve ATS match.
+    - Use soft_skills from the first pass through phrasing about collaboration, execution, ownership, debugging, communication, or delivery.
+    - Do not invent fake project claims. If a first-pass skill is user-verified but not clearly tied to a specific project in the base resume, prefer to use it in the summary or skills section instead of fabricating project details.
 
     Keyword behavior
-    - Distribute the strongest supported keywords naturally across summary, skills, experience, and projects.
+    - Distribute the hard_skills and soft_skills naturally across summary, skills, experience, and projects.
     - Prefer natural repetition over obvious repetition.
-    - Use exact job-description wording selectively when truthful and useful.
+    - Use job-description wording selectively when useful.
+    - It is acceptable to add first-pass hard_skills to the summary or skills section to improve ATS coverage, even when they are not strongly emphasized in the current base wording, because those skills are user-verified.
+    - Do not add a concrete technology, implementation detail, metric, or environment claim to experience or project bullets unless it is evidenced by the base resume.
     - Avoid keyword stuffing, awkward phrasing, and buzzword clustering.
 
     Output scope
@@ -386,14 +392,14 @@ async def rewrite_resume_with_keyword_plan(
     system_prompt = """
     You are a senior software-engineering resume writer and a precise JSON generator.
 
-    Your task is to rewrite a base resume for a target software engineering job using an evidence-based keyword plan.
+    Your task is to rewrite a base resume for a target software engineering job using a job-keyword plan.
 
     Rules:
     - Return exactly one valid JSON object matching the required schema.
     - Do not output markdown, commentary, or extra text.
-    - Base resume facts are the source of truth.
-    - The keyword plan controls emphasis, not facts.
-    - Never invent or imply experience that is not supported by the base resume.
+    - Base resume facts are the source of truth for concrete jobs, projects, dates, companies, and measurable claims.
+    - The keyword plan contains user-verified hard_skills and soft_skills that are allowed to be used in the rewrite, even if the current base resume wording does not mention every one of them explicitly.
+    - Never invent fake experience or project claims that are not evidenced by the base resume.
     - Optimize for both ATS match and human credibility.
     - Write like an experienced real resume writer: concise, specific, relevant, and natural.
     - Avoid robotic wording, buzzword stacking, and generic filler.
@@ -415,16 +421,14 @@ async def personalize_resume_with_two_step_ai(
 ) -> Resume:
     """
     Two-step AI-only resume generation flow:
-    1. Generate keyword plan from job + resume.
+    1. Generate keyword plan from the job description.
     2. Rewrite the resume using that plan.
     """
     job_id = job_details.get("job_id")
     logging.info(f"Generating keyword plan for job_id: {job_id}")
     keyword_plan = await generate_keyword_plan_with_llm(
-        full_resume=base_resume_details,
         job_details=job_details,
     )
-
     logging.info(f"Rewriting resume with AI keyword plan for job_id: {job_id}")
     rewritten_resume = await rewrite_resume_with_keyword_plan(
         full_resume=base_resume_details,
@@ -573,7 +577,7 @@ async def personalize_section_with_llm(
             - Enhance the 'description' field ONLY. All other fields (job_title, company, dates, etc.) MUST remain UNCHANGED within this specific experience item.
             - Integrate relevant skills from the "Full Resume Context" (especially any explicit skills list) and keywords from the "Target Job Description" naturally into the description.
             - Show HOW these skills were applied and what the IMPACT or achievement was. Quantify achievements if possible, based on the original content.
-            - Return the description as about 5 concise bullet-ready lines separated by newline characters.
+            - Return the description as exactly 5 concise bullet-ready lines separated by newline characters.
             - Prefer the strongest and most relevant bullets rather than preserving every lower-value detail from the original wording.
             - You may combine or reshape original points into stronger bullets as long as the result stays truthful to the resume evidence.
             - Example: Instead of "Used Python for scripting," try "Automated data processing tasks using Python scripts, reducing manual effort by 20%."
@@ -595,7 +599,7 @@ async def personalize_section_with_llm(
             - Enhance the 'description' field ONLY. All other fields (name, technologies, link, etc.) MUST remain UNCHANGED within this specific project item.
             - Integrate relevant skills from the "Full Resume Context" and keywords from the "Target Job Description" naturally into the description.
             - Show HOW these skills were applied.
-            - Aim for about 4 concise bullet-ready lines separated by newline characters, but you may use 3-5 if that creates a stronger project entry.
+            - Return the description as 4 or 5 concise bullet-ready lines separated by newline characters.
             - Prefer the most impressive and most job-relevant outcomes instead of trying to preserve every lower-value detail.
             - You may combine or reshape original points into stronger bullets as long as the result stays truthful to the resume evidence.
             - Example: Instead of "Project using React," try "Developed a responsive UI for [Project Purpose] using React and Redux, improving user engagement."
@@ -831,15 +835,30 @@ async def process_job(
                 else:
                     logging.info(f"Skipping empty section: {section_name} for job_id: {job_id}")
 
+        personalized_resume_data = _normalize_personalized_resume_output(
+            base_resume=base_resume_details,
+            personalized_resume=personalized_resume_data,
+        )
+
         # 2. Generate PDF
         logging.info(f"Generating PDF for job_id: {job_id}")
         try:
+            header_title = str(job_details.get("job_title") or "").strip()
             pdf_bytes = pdf_generator.create_resume_pdf(
                 personalized_resume_data,
-                header_title=str(job_details.get("job_title") or "").strip(),
+                header_title=header_title,
             )
             if not pdf_bytes:
-                 raise ValueError("PDF generation returned empty bytes.")
+                raise ValueError("PDF generation returned empty bytes.")
+            pdf_is_valid, pdf_issues = resume_validator.validate_generated_resume_pdf(
+                pdf_bytes=pdf_bytes,
+                resume_data=personalized_resume_data,
+                header_title=header_title,
+            )
+            if not pdf_is_valid:
+                raise ValueError(
+                    "PDF validation failed: " + "; ".join(pdf_issues)
+                )
             logging.info(f"PDF generation complete for job_id: {job_id}")
         except Exception as e:
             logging.error(f"Failed to generate PDF for job_id {job_id}: {e}")

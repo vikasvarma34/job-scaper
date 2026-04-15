@@ -2,10 +2,91 @@
 
 This file is the fastest way to run the project without searching across code.
 
-## 1. Change Numbers In One Place
-Edit: `config.py`
+## 0. Daily Copy-Paste Flow
 
-## 0. Base Resume Source Of Truth
+Run from project root inside `.venv`.
+
+### Every day: scrape -> score -> generate top resumes
+
+If you want the normal full cycle:
+
+```bash
+python scraper.py
+python score_jobs.py
+python custom_resume_generator.py --flow two_step_ai
+```
+
+### Every day: full cycle but generate only top 10
+
+```bash
+python scraper.py
+python score_jobs.py
+python custom_resume_generator.py --flow two_step_ai --limit 10
+```
+
+### Every day: full cycle but generate only top 20
+
+```bash
+python scraper.py
+python score_jobs.py
+python custom_resume_generator.py --flow two_step_ai --limit 20
+```
+
+### Skip scrape and only score + generate
+
+Use this when you already scraped jobs earlier and just want to continue:
+
+```bash
+python score_jobs.py
+python custom_resume_generator.py --flow two_step_ai --limit 10
+```
+
+### Generate one exact job
+
+```bash
+python custom_resume_generator.py --job-id 4400767090 --flow two_step_ai
+```
+
+### Regenerate one exact job
+
+```bash
+python custom_resume_generator.py --job-id 4400767090 --flow two_step_ai --force-regenerate
+```
+
+### One-command cycle
+
+If you want one command instead of three:
+
+```bash
+python daily_ops.py run-cycle --customize-limit 10
+python daily_ops.py run-cycle --customize-limit 20
+```
+
+### My recommended default
+
+If you want one simple daily habit, use this:
+
+```bash
+python scraper.py
+python score_jobs.py
+python custom_resume_generator.py --flow two_step_ai --limit 10
+```
+
+### Dashboard with auto-restart while editing
+
+Use this for local dashboard development so the server restarts automatically when you change `app.py`, templates, or CSS:
+
+```bash
+PORT=5050 APP_DEBUG=true .venv/bin/python app.py
+```
+
+Open:
+
+```text
+http://localhost:5050
+```
+
+## 1. Base Resume Source Of Truth
 
 Edit: `resume.json`
 
@@ -17,6 +98,9 @@ Edit: `resume.json`
   - keep `skills` as a full list of real skills
   - keep `experience.description` as newline-separated bullet text
   - keep `projects.description` as newline-separated bullet text
+
+## 2. Change Numbers In One Place
+Edit: `config.py`
 
 Main numeric controls:
 
@@ -51,7 +135,7 @@ MIN_SCORE_FOR_CUSTOM_RESUME = 0
 LINKEDIN_MAX_START = 0
 ```
 
-## 2. Python Commands (Normal Flow)
+## 3. Python Commands (Normal Flow)
 
 Run from project root (inside `.venv`):
 
@@ -122,7 +206,7 @@ python daily_ops.py run-cycle --customize-limit 10
 python daily_ops.py run-cycle --customize-limit 20
 ```
 
-## 2.1 Resume Editing Workflow
+## 4. Resume Editing Workflow
 
 When you want to update your base resume:
 
@@ -139,7 +223,7 @@ python custom_resume_generator.py --job-id 4399298072 --flow two_step_ai
 python custom_resume_generator.py --job-id 4399298072 --flow two_step_ai --force-regenerate
 ```
 
-## 3. Mark Jobs As Applied
+## 5. Mark Jobs As Applied
 
 After manual apply on LinkedIn:
 
@@ -153,13 +237,13 @@ Example:
 python daily_ops.py mark-applied 4395995496 4399415983 4399298072
 ```
 
-## 4. Export Applied History To CSV
+## 6. Export Applied History To CSV
 
 ```bash
 python daily_ops.py export-applied --output applied_jobs_today.csv
 ```
 
-## 5. Cleanup / Clear Session (End of Day)
+## 7. Cleanup / Clear Session (End of Day)
 
 ```bash
 python daily_ops.py cleanup
@@ -171,7 +255,7 @@ Optional full cleanup (also remove base resume + source resume file from `resume
 python daily_ops.py cleanup --delete-base-resume --delete-source-resume
 ```
 
-## 6. SQL: Get LinkedIn Links For Generated Resumes
+## 8. SQL: Get LinkedIn Links For Generated Resumes
 
 Run in Supabase SQL Editor:
 
@@ -194,7 +278,7 @@ where j.status = 'resume_generated'
 order by j.resume_score desc nulls last, j.scraped_at desc;
 ```
 
-## 7. SQL: See Applied Jobs + Links
+## 9. SQL: See Applied Jobs + Links
 
 ```sql
 select

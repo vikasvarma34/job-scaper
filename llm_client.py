@@ -33,6 +33,12 @@ logger = logging.getLogger(__name__)
 litellm.suppress_debug_info = True
 if os.environ.get("LLM_DEBUG", "").lower() == "true":
     litellm.set_verbose = True
+else:
+    for logger_name in ("LiteLLM", "litellm"):
+        third_party_logger = logging.getLogger(logger_name)
+        third_party_logger.setLevel(logging.WARNING)
+        third_party_logger.handlers.clear()
+        third_party_logger.propagate = True
 
 
 class RateLimiter:

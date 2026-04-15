@@ -1,0 +1,431 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Job Pipeline Dashboard</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+  </head>
+  <body>
+    <main class="page-shell">
+      <section class="hero-panel">
+        <div>
+          <p class="eyebrow">Resume Ops Dashboard</p>
+          <h1>Job Pipeline Dashboard</h1>
+          <p class="hero-copy">
+            Scrape, score, generate, and track every job from one clean dashboard.
+          </p>
+        </div>
+        <div class="hero-note">
+          <p class="hero-note-label">Resume generation rule</p>
+          <p class="hero-note-copy">Generate by job ID automatically regenerates if that job already has a customized resume.</p>
+        </div>
+      </section>
+
+      <section class="stats-grid">
+        <article class="stat-card">
+          <p class="stat-label">Total Jobs</p>
+          <p class="stat-value" id="total-jobs">{{ data.stats.total_jobs }}</p>
+        </article>
+        <article class="stat-card">
+          <p class="stat-label">Scored Jobs</p>
+          <p class="stat-value" id="scored-jobs">{{ data.stats.scored_jobs }}</p>
+        </article>
+        <article class="stat-card">
+          <p class="stat-label">Resumes Generated</p>
+          <p class="stat-value" id="generated-jobs">{{ data.stats.resumes_generated }}</p>
+        </article>
+        <article class="stat-card">
+          <p class="stat-label">Pending Resume</p>
+          <p class="stat-value" id="pending-jobs">{{ data.stats.pending_jobs }}</p>
+        </article>
+      </section>
+
+      <section class="main-grid">
+        <article class="panel">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">Current Run</p>
+              <h2 id="task-label">{{ state.label }}</h2>
+            </div>
+            <span class="status-pill status-{{ state.status }}" id="task-status">{{ state.status }}</span>
+          </div>
+          <p class="panel-copy" id="task-command">
+            {% if state.command %}{{ " ".join(state.command) }}{% else %}No command running{% endif %}
+          </p>
+          <p class="panel-copy secondary" id="task-timing">
+            {% if state.started_at %}
+              Started: {{ state.started_at }}
+            {% else %}
+              Ready
+            {% endif %}
+          </p>
+        </article>
+
+        <article class="panel">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">Actions</p>
+              <h2>Run Tasks</h2>
+            </div>
+          </div>
+          <div class="actions-grid">
+            <button data-action="scrape" class="action-button primary">Scrape Jobs</button>
+            <button data-action="score" class="action-button">Score Jobs</button>
+            <button data-action="generate_next" class="action-button">Generate Next Resume</button>
+            <button data-action="cleanup" class="action-button danger">Cleanup</button>
+          </div>
+          <div class="job-runner">
+            <label class="field-label" for="job-id-input">Generate With Job ID</label>
+            <div class="job-runner-row">
+              <input id="job-id-input" class="job-input" type="text" placeholder="Enter job id like 4400767090">
+              <button data-action="generate_job" class="action-button dark">Generate With ID</button>
+            </div>
+            <p class="helper-text">Generate Next Resume always starts with the highest-scored jobs that do not already have a customized resume. Generate With ID automatically regenerates if that job already has one.</p>
+          </div>
+        </article>
+      </section>
+
+      <section class="panel log-panel">
+        <div class="panel-header">
+          <div>
+            <p class="eyebrow">Live Logs</p>
+            <h2>Execution Output</h2>
+          </div>
+          <button id="refresh-button" class="secondary-button">Refresh</button>
+        </div>
+        <pre id="log-output" class="log-output">{% if state.logs %}{{ "\n".join(state.logs) }}{% else %}No logs yet.{% endif %}</pre>
+      </section>
+
+      <section class="panel jobs-panel">
+        <div class="panel-header">
+          <div>
+            <p class="eyebrow">Job Pipeline</p>
+            <h2>All Jobs</h2>
+          </div>
+          <div class="toolbar">
+            <input id="search-input" class="search-input" type="search" placeholder="Search company, title, job id">
+            <select id="status-filter" class="filter-select">
+              <option value="all">All Statuses</option>
+              <option value="new">New</option>
+              <option value="resume_generated">Resume Generated</option>
+              <option value="applied">Applied</option>
+              <option value="scored">Scored Only</option>
+              <option value="no_resume">No Resume Yet</option>
+            </select>
+          </div>
+        </div>
+        <p id="jobs-error" class="error-text">{% if data.jobs_error %}{{ data.jobs_error }}{% endif %}</p>
+        <div class="table-wrap">
+          <table class="jobs-table">
+            <thead>
+              <tr>
+                <th>Job</th>
+                <th>Company</th>
+                <th>Status</th>
+                <th>Score</th>
+                <th>Provider</th>
+                <th>Location</th>
+                <th>Resume</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="jobs-body">
+              {% for job in data.jobs %}
+                <tr>
+                  <td>
+                    <div class="job-cell">
+                      <strong>{{ job.job_title or "Untitled Job" }}</strong>
+                      <span>{{ job.job_id }}</span>
+                    </div>
+                  </td>
+                  <td>{{ job.company or "Unknown Company" }}</td>
+                  <td><span class="table-pill">{{ job.status or "unknown" }}</span></td>
+                  <td>{{ job.resume_score if job.resume_score is not none else "—" }}</td>
+                  <td>{{ job.provider or "—" }}</td>
+                  <td>{{ job.location or "—" }}</td>
+                  <td>
+                    {% if job.has_resume %}
+                      <span class="resume-state ready">Available</span>
+                    {% else %}
+                      <span class="resume-state">Not generated</span>
+                    {% endif %}
+                  </td>
+                  <td>
+                    <div class="table-links">
+                      {% if job.job_url %}
+                        <a href="{{ job.job_url }}" target="_blank" rel="noreferrer">Open Job</a>
+                      {% endif %}
+                      {% if job.resume_download_url %}
+                        <a href="{{ job.resume_download_url }}">Download Resume</a>
+                      {% endif %}
+                    </div>
+                  </td>
+                </tr>
+              {% else %}
+                <tr>
+                  <td colspan="8" class="empty-row">No jobs loaded yet.</td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+
+    <script>
+      const statusUrl = "{{ url_for('status') }}";
+      const dataUrl = "{{ url_for('data') }}";
+      const runUrl = "{{ url_for('run_action') }}";
+      const logOutput = document.getElementById("log-output");
+      const taskLabel = document.getElementById("task-label");
+      const taskStatus = document.getElementById("task-status");
+      const taskCommand = document.getElementById("task-command");
+      const taskTiming = document.getElementById("task-timing");
+      const jobIdInput = document.getElementById("job-id-input");
+      const refreshButton = document.getElementById("refresh-button");
+      const jobsBody = document.getElementById("jobs-body");
+      const jobsError = document.getElementById("jobs-error");
+      const searchInput = document.getElementById("search-input");
+      const statusFilter = document.getElementById("status-filter");
+      const totalJobs = document.getElementById("total-jobs");
+      const scoredJobs = document.getElementById("scored-jobs");
+      const generatedJobs = document.getElementById("generated-jobs");
+      const pendingJobs = document.getElementById("pending-jobs");
+
+      const actionLabels = {
+        scrape: "scrape jobs",
+        score: "score jobs",
+        generate_next: "generate resumes for the highest-scored jobs without customized resumes",
+        cleanup: "run cleanup",
+        generate_job: "generate a resume for this job ID"
+      };
+
+      let allJobs = {{ data.jobs | tojson }};
+      let lastKnownTaskStatus = "{{ state.status }}";
+      let lastKnownTaskId = "{{ state.id or '' }}";
+      let refreshTimer = null;
+
+      function updateButtons(isRunning) {
+        document.querySelectorAll(".action-button").forEach((button) => {
+          button.disabled = isRunning;
+        });
+      }
+
+      function renderState(state) {
+        taskLabel.textContent = state.label || "Idle";
+        taskStatus.textContent = state.status || "idle";
+        taskStatus.className = `status-pill status-${state.status || "idle"}`;
+        taskCommand.textContent = state.command && state.command.length
+          ? state.command.join(" ")
+          : "No command running";
+
+        if (state.started_at) {
+          const finished = state.finished_at ? ` | Finished: ${state.finished_at}` : "";
+          taskTiming.textContent = `Started: ${state.started_at}${finished}`;
+        } else {
+          taskTiming.textContent = "Ready";
+        }
+
+        logOutput.textContent = state.logs && state.logs.length
+          ? state.logs.join("\n")
+          : "No logs yet.";
+        logOutput.scrollTop = logOutput.scrollHeight;
+        updateButtons(state.status === "running");
+      }
+
+      function renderStats(stats) {
+        totalJobs.textContent = stats.total_jobs || 0;
+        scoredJobs.textContent = stats.scored_jobs || 0;
+        generatedJobs.textContent = stats.resumes_generated || 0;
+        pendingJobs.textContent = stats.pending_jobs || 0;
+      }
+
+      function escapeHtml(value) {
+        return String(value ?? "")
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#39;");
+      }
+
+      function matchesStatusFilter(job, filterValue) {
+        if (filterValue === "all") {
+          return true;
+        }
+        if (filterValue === "no_resume") {
+          return !job.has_resume;
+        }
+        if (filterValue === "scored") {
+          return job.resume_score !== null && job.resume_score !== undefined;
+        }
+        return String(job.status || "").toLowerCase() === filterValue;
+      }
+
+      function renderJobs(items) {
+        const searchTerm = searchInput.value.trim().toLowerCase();
+        const filterValue = statusFilter.value;
+        const visibleJobs = items.filter((job) => {
+          const searchable = [
+            job.job_title || "",
+            job.company || "",
+            job.job_id || "",
+            job.location || "",
+            job.provider || ""
+          ].join(" ").toLowerCase();
+          const matchesSearch = !searchTerm || searchable.includes(searchTerm);
+          return matchesSearch && matchesStatusFilter(job, filterValue);
+        });
+
+        if (!visibleJobs.length) {
+          jobsBody.innerHTML = `<tr><td colspan="8" class="empty-row">No jobs match the current filters.</td></tr>`;
+          return;
+        }
+
+        jobsBody.innerHTML = visibleJobs.map((job) => {
+          const scoreText = job.resume_score !== null && job.resume_score !== undefined ? job.resume_score : "—";
+          const resumeState = job.has_resume
+            ? `<span class="resume-state ready">Available</span>`
+            : `<span class="resume-state">Not generated</span>`;
+
+          const links = [];
+          if (job.job_url) {
+            links.push(`<a href="${escapeHtml(job.job_url)}" target="_blank" rel="noreferrer">Open Job</a>`);
+          }
+          if (job.resume_download_url) {
+            links.push(`<a href="${escapeHtml(job.resume_download_url)}">Download Resume</a>`);
+          }
+
+          return `
+            <tr>
+              <td>
+                <div class="job-cell">
+                  <strong>${escapeHtml(job.job_title || "Untitled Job")}</strong>
+                  <span>${escapeHtml(job.job_id || "")}</span>
+                </div>
+              </td>
+              <td>${escapeHtml(job.company || "Unknown Company")}</td>
+              <td><span class="table-pill">${escapeHtml(job.status || "unknown")}</span></td>
+              <td>${escapeHtml(scoreText)}</td>
+              <td>${escapeHtml(job.provider || "—")}</td>
+              <td>${escapeHtml(job.location || "—")}</td>
+              <td>${resumeState}</td>
+              <td><div class="table-links">${links.join("") || "—"}</div></td>
+            </tr>
+          `;
+        }).join("");
+      }
+
+      async function loadStatus() {
+        const response = await fetch(statusUrl);
+        const state = await response.json();
+        renderState(state);
+        const taskFinished = (
+          lastKnownTaskStatus === "running" &&
+          state.status !== "running" &&
+          state.id === lastKnownTaskId
+        );
+        lastKnownTaskStatus = state.status || "idle";
+        lastKnownTaskId = state.id || "";
+        if (taskFinished) {
+          await loadData();
+        }
+        return state;
+      }
+
+      async function loadData() {
+        const response = await fetch(dataUrl);
+        const data = await response.json();
+        jobsError.textContent = data.jobs_error || "";
+        allJobs = data.jobs || [];
+        renderStats(data.stats || {});
+        renderJobs(allJobs);
+        return data;
+      }
+
+      async function refreshDashboard() {
+        await loadStatus();
+        await loadData();
+      }
+
+      function scheduleRefreshLoop() {
+        if (refreshTimer) {
+          window.clearTimeout(refreshTimer);
+        }
+        const intervalMs = lastKnownTaskStatus === "running" ? 1500 : 4000;
+        refreshTimer = window.setTimeout(async () => {
+          await refreshDashboard();
+          scheduleRefreshLoop();
+        }, intervalMs);
+      }
+
+      async function runAction(action) {
+        const jobId = jobIdInput.value.trim();
+        let count = "";
+
+        if (action === "generate_job" && !jobId) {
+          alert("Enter a job id first.");
+          return;
+        }
+
+        if (action === "generate_next") {
+          count = window.prompt("How many top resumes do you want to generate?", "10") || "";
+          if (!count.trim()) {
+            return;
+          }
+          const parsed = Number.parseInt(count, 10);
+          if (!Number.isInteger(parsed) || parsed <= 0) {
+            alert("Enter a valid positive number.");
+            return;
+          }
+          count = String(parsed);
+        }
+
+        const actionLabel = actionLabels[action] || "run this action";
+        const details = action === "generate_next"
+          ? ` for ${count} resume${count === "1" ? "" : "s"}`
+          : (jobId ? ` for job ${jobId}` : "");
+        const isConfirmed = window.confirm(`Are you sure you want to ${actionLabel}${details}?`);
+        if (!isConfirmed) {
+          return;
+        }
+
+        const formData = new FormData();
+        formData.append("action", action);
+        if (jobId) {
+          formData.append("job_id", jobId);
+        }
+        if (count) {
+          formData.append("count", count);
+        }
+
+        const response = await fetch(runUrl, {
+          method: "POST",
+          body: formData,
+          headers: { "Accept": "application/json" }
+        });
+        const payload = await response.json();
+        if (!response.ok) {
+          alert(payload.error || "Failed to start task.");
+          return;
+        }
+        await refreshDashboard();
+        scheduleRefreshLoop();
+      }
+
+      document.querySelectorAll(".action-button").forEach((button) => {
+        button.addEventListener("click", () => runAction(button.dataset.action));
+      });
+
+      refreshButton.addEventListener("click", async () => {
+        await refreshDashboard();
+        scheduleRefreshLoop();
+      });
+      searchInput.addEventListener("input", () => renderJobs(allJobs));
+      statusFilter.addEventListener("change", () => renderJobs(allJobs));
+
+      refreshDashboard().then(scheduleRefreshLoop);
+    </script>
+  </body>
+</html>
