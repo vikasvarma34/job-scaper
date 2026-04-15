@@ -118,9 +118,37 @@ def get_resume_score_from_ai(resume_text: str, job_details: Dict[str, Any]) -> O
     logging.info(f"Scoring job_id: {job_details.get('job_id')} with job_title: {job_title} and job_level: {job_level}")
 
     prompt = f"""
-    You are a scoring assistant. You will be given a resume and a job description.  
-    Based **only** on the information provided, **return exactly one integer between 0 and 100** (inclusive) that represents the candidate’s suitability for the role.  
-    Do **not** return any words, punctuation, or explanation—only the integer.
+    You are an expert resume-to-job matching evaluator.
+    You will be given one resume and one job description.
+
+    Your task is to assess the candidate's fit for the role using a careful holistic review, not shallow keyword counting.
+
+    Evaluate all of the following before deciding the score:
+    1. Job title alignment
+    2. Seniority / years-of-experience alignment
+    3. Hard-skill overlap
+    4. Stack / tool / framework overlap
+    5. Relevance of actual work experience
+    6. Relevance of projects
+    7. Domain or platform relevance when clearly present
+    8. Evidence of ownership, implementation depth, and production work
+
+    Scoring guidance:
+    - 90-100: Excellent fit; strong title, experience, and technical alignment
+    - 75-89: Good fit; strong overlap with some gaps
+    - 60-74: Moderate fit; some relevant overlap but meaningful gaps
+    - 40-59: Weak fit; partial overlap only
+    - 0-39: Poor fit; little real alignment
+
+    Important rules:
+    - Base the score only on the provided resume and job description.
+    - Do not reward generic buzzwords unless supported by real evidence.
+    - Give more weight to relevant hard skills and actual experience than to soft skills.
+    - Give more weight to recent and directly relevant experience/projects than to minor mentions.
+    - Do not penalize for missing skills that are clearly optional or nice-to-have unless the JD strongly emphasizes them.
+    - Do not output any explanation.
+    - Return exactly one integer between 0 and 100.
+    - Return only the integer, with no words or punctuation.
 
     --- RESUME ---
     {resume_text}

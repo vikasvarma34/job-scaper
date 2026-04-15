@@ -1,0 +1,46 @@
+INFO:root:Script started.
+INFO:root:Starting new job processing cycle...
+INFO:root:Fetching base resume from 'base_resume'...
+INFO:root:Successfully fetched base resume data from Supabase.
+INFO:root:Successfully loaded base resume from Supabase database.
+INFO:root:Successfully parsed base resume.
+INFO:root:Custom resume engine selected: ats_v2
+INFO:root:Manual limit override detected (1). Selecting the next highest not-yet-generated jobs regardless of MIN_SCORE_FOR_CUSTOM_RESUME.
+INFO:root:Fetching top 1 scored jobs to apply for...
+INFO:root:Fetching up to 1 top-scored jobs to apply for using RPC 'get_top_scored_jobs_custom_sort'...
+INFO:root:Successfully fetched 1 top-scored jobs to apply for via RPC.
+INFO:root:Found 1 jobs to process.
+INFO:root:--- Starting processing for job_id: 4400208889 ---
+INFO:root:Using ATS v2 engine for job_id: 4400208889
+INFO:root:Waiting for 1 seconds before ATS keyword planning...
+[92m01:56:46 - LiteLLM:INFO[0m: utils.py:4004 - 
+LiteLLM completion() model= gpt-5.4; provider = openai
+INFO:LiteLLM:
+LiteLLM completion() model= gpt-5.4; provider = openai
+[92m01:57:12 - LiteLLM:INFO[0m: utils.py:1652 - Wrapper: Completed Call, calling success_handler
+INFO:LiteLLM:Wrapper: Completed Call, calling success_handler
+INFO:root:Waiting for 1 seconds before ATS resume rewrite...
+[92m01:57:15 - LiteLLM:INFO[0m: utils.py:4004 - 
+LiteLLM completion() model= gpt-5.4; provider = openai
+INFO:LiteLLM:
+LiteLLM completion() model= gpt-5.4; provider = openai
+[92m01:57:42 - LiteLLM:INFO[0m: utils.py:1652 - Wrapper: Completed Call, calling success_handler
+INFO:LiteLLM:Wrapper: Completed Call, calling success_handler
+INFO:root:Local ATS heuristic score for job_id 4400208889: 82/100
+INFO:root:Generating PDF for job_id: 4400208889
+INFO:root:PDF generated successfully.
+INFO:root:PDF generation complete for job_id: 4400208889
+INFO:root:Uploading PDF to VIKAS_POKALA_GE_VERNOVA_4400208889.pdf for job_id: 4400208889
+INFO:root:Uploading resume to Supabase Storage at path: VIKAS_POKALA_GE_VERNOVA_4400208889.pdf
+INFO:root:Successfully uploaded resume to path: VIKAS_POKALA_GE_VERNOVA_4400208889.pdf
+INFO:root:Successfully uploaded PDF for job_id: 4400208889. Path: VIKAS_POKALA_GE_VERNOVA_4400208889.pdf
+INFO:root:Adding customized resume to Supabase
+INFO:root:Saving customized resume for email: vikaspokala96@gmail.com with path 'VIKAS_POKALA_GE_VERNOVA_4400208889.pdf' to table 'customized_resumes'
+INFO:root:Successfully saved customized resume for vikaspokala96@gmail.com with ID: 67d0133d-fc7f-4ffd-8bab-38a3e19708d9.
+INFO:root:Updating job record for job_id: 4400208889 with resume path.
+INFO:root:Updating job 4400208889 with resume link, resume id and status 'resume_generated'...
+INFO:root:Successfully updated job 4400208889.
+INFO:root:Successfully updated job record for job_id: 4400208889
+INFO:root:--- Finished processing for job_id: 4400208889 ---
+INFO:root:Finished job processing cycle.
+INFO:root:Rresume processing completed successfully.

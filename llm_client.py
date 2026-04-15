@@ -150,6 +150,8 @@ class LLMClient:
         temperature: float = 1,
         response_format: Optional[Type[BaseModel]] = None,
         model_override: Optional[str] = None,
+        reasoning_effort: Optional[str] = None,
+        verbosity: Optional[str] = None,
     ) -> str:
         """
         Generate content using the configured LLM.
@@ -160,6 +162,8 @@ class LLMClient:
             temperature: Temperature for generation (0.0-1.0)
             response_format: Optional Pydantic model for structured JSON output
             model_override: Override the default model for this call
+            reasoning_effort: Optional reasoning effort for supported models
+            verbosity: Optional verbosity for supported models
 
         Returns:
             The generated text content as a string
@@ -171,6 +175,23 @@ class LLMClient:
         self._check_daily_budget()
 
         model = model_override or self.model
+        normalized_temperature = temperature
+        normalized_reasoning_effort = reasoning_effort
+
+        # OpenAI GPT-5 reasoning calls currently require temperature=1.
+        # Keep legacy/non-reasoning calls unchanged, but normalize ATS planner-style
+        # calls so they don't fail and fall back to the old flow.
+        if (
+            model.lower().startswith("openai/gpt-5")
+            and normalized_reasoning_effort not in (None, "", "none")
+            and normalized_temperature != 1
+        ):
+            logger.info(
+                "Normalizing temperature to 1 for OpenAI GPT-5 reasoning call "
+                f"(requested {normalized_temperature})."
+            )
+            normalized_temperature = 1
+
         messages = []
 
         if system_prompt:
@@ -180,7 +201,7 @@ class LLMClient:
         # Build base kwargs for litellm.completion
         base_kwargs = {
             "messages": messages,
-            "temperature": temperature,
+            "temperature": normalized_temperature,
         }
 
         # Add API key if set
@@ -190,6 +211,10 @@ class LLMClient:
         # Add structured output (Pydantic model)
         if response_format is not None:
             base_kwargs["response_format"] = response_format
+        if normalized_reasoning_effort is not None:
+            base_kwargs["reasoning_effort"] = normalized_reasoning_effort
+        if verbosity is not None:
+            base_kwargs["verbosity"] = verbosity
 
         last_exception = None
 

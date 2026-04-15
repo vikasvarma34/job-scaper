@@ -17,6 +17,7 @@ This project is a comprehensive suite of tools designed to automate and enhance 
     ([job_manager.py](job_manager.py))
 - **Data Storage**: Uses Supabase to store job data, resume details, and application statuses. (Utility functions in [supabase_utils.py](supabase_utils.py))
 - **Custom PDF Resume Generation**: Generates ATS-friendly PDF resumes from structured resume data. ([pdf_generator.py](pdf_generator.py))
+- **Resume Personalization**: Generates customized resumes using the legacy section-by-section personalization flow. ([custom_resume_generator.py](custom_resume_generator.py))
 - **AI-Powered Text Processing**: Leverages any configured LLM for tasks like resume parsing and job description formatting.
 - **Quota Management**: Built-in rate limiting, exponential backoff, and daily budget tracking for LLM API calls. Features dynamic model rotation (e.g., automatically switching between Gemini models) to bypass rate limitations.
 - **Automated Workflows**: Includes optimized GitHub Actions for running tasks on a schedule without exhausting quotas. ([workflows](.github/workflows/))

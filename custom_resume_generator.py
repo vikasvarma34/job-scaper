@@ -1,3 +1,4 @@
+import argparse
 import logging
 import io # Import io
 import supabase_utils
@@ -18,6 +19,26 @@ import time
 import os
 # --- Logging Setup ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+def _sanitize_filename_token(value: Any, default: str = "UNKNOWN") -> str:
+    """
+    Convert arbitrary text into a safe uppercase filename token.
+    Example: "Tata Consultancy Services" -> "TATA_CONSULTANCY_SERVICES"
+    """
+    text = str(value or "").strip()
+    if not text:
+        return default
+    text = re.sub(r"[^A-Za-z0-9]+", "_", text)
+    text = re.sub(r"_+", "_", text).strip("_")
+    return (text or default).upper()
+
+def _build_resume_filename(job_id: str, company: Any) -> str:
+    """
+    Build a readable resume filename for storage.
+    """
+    company_token = _sanitize_filename_token(company, default="COMPANY")
+    job_token = _sanitize_filename_token(job_id, default="JOB")
+    return f"VIKAS_POKALA_{company_token}_{job_token}.pdf"
 
 # --- LLM Personalization Function ---
 def extract_json_from_text(text: str) -> str:
@@ -54,7 +75,7 @@ async def personalize_section_with_llm(
     job_details: Dict[str, Any]
     ) -> Any:
     """
-    Uses Gemini Flash 2.0 to personalize a specific section of the resume for the given job.
+    Uses the configured LLM to personalize a specific section of the resume for the given job.
     """
     if not section_content or section_content == "NA":
         logging.warning(f"Skipping personalization for empty or 'NA' section: {section_name}")
@@ -215,7 +236,7 @@ async def personalize_section_with_llm(
 
     responses = []
     for prompt in prompts:
-        logging.info(f"Sending prompt to Gemini for section: {section_name} with structured output schema.")
+        logging.info(f"Sending prompt to LLM for section: {section_name} with structured output schema.")
 
         # messages = [
         # {'role': 'system', 'content': 'You are an expert resume writer. Only rewrite or generate the specified resume section. Never return the full resume or any unrelated content. Output strictly in the JSON format defined by the provided schema. Do not add any explanatory text before or after the JSON object.'},
@@ -226,7 +247,7 @@ async def personalize_section_with_llm(
             llm_output = primary_client.generate_content(
                 prompt=prompt,
                 system_prompt=system_prompt,
-                temperature=1,
+                temperature=0.2,
                 response_format=OutputModel,
             )
             
@@ -253,7 +274,7 @@ async def personalize_section_with_llm(
             # Fallback: return original content if LLM call fails
             return section_content
 
-    logging.info(f"Received {len(responses)} responses from Gemini for section: {section_name}")
+    logging.info(f"Received {len(responses)} responses from LLM for section: {section_name}")
 
     if(section_name == "summary"):
         return getattr(responses[0], output_key)
@@ -270,7 +291,7 @@ async def personalize_section_with_llm(
             project_list.append(getattr(response, output_key))
         return project_list
 
-async def validate_customization(
+def validate_customization(
     section_name: str, 
     original_content: Any, 
     customized_content: Any
@@ -334,7 +355,10 @@ async def validate_customization(
 
 
 # --- Main Processing Logic ---
-async def process_job(job_details: Dict[str, Any], base_resume_details: Resume):
+async def process_job(
+    job_details: Dict[str, Any],
+    base_resume_details: Resume,
+):
     """
     Processes a single job: personalizes resume, generates PDF, uploads, updates status.
     """
@@ -347,9 +371,8 @@ async def process_job(job_details: Dict[str, Any], base_resume_details: Resume):
 
     try:
         # 1. Personalize Resume Sections
-        personalized_resume_data = base_resume_details.model_copy(deep=True) # Create a copy for this job
+        personalized_resume_data = base_resume_details.model_copy(deep=True)
         any_validation_failed = False
-
         sections_to_personalize = {
             "summary": base_resume_details.summary,
             "experience": base_resume_details.experience,
@@ -360,9 +383,9 @@ async def process_job(job_details: Dict[str, Any], base_resume_details: Resume):
         sleep_time = config.LLM_REQUEST_DELAY_SECONDS
 
         for section_name, section_content in sections_to_personalize.items():
-            if any_validation_failed: # If a previous section failed validation, skip further personalization
+            if any_validation_failed:
                 logging.warning(f"Skipping further personalization for job_id {job_id} due to prior validation failure.")
-                break # Exit the loop over sections
+                break
 
             if section_content and section_content != "NA":
                 logging.info(f"Waiting for {sleep_time} seconds before next request...")
@@ -372,13 +395,12 @@ async def process_job(job_details: Dict[str, Any], base_resume_details: Resume):
                 personalized_content = await personalize_section_with_llm(
                     section_name,
                     section_content,
-                    base_resume_details, # Pass the original full resume for context
-                    job_details # Pass the specific job details
+                    base_resume_details,
+                    job_details
                 )
 
-                # Validate the customization programmatically
                 logging.info(f"Validating customization for section: {section_name} for job_id: {job_id}")
-                is_valid, reason = await validate_customization(
+                is_valid, reason = validate_customization(
                     section_name,
                     section_content,
                     personalized_content
@@ -386,31 +408,23 @@ async def process_job(job_details: Dict[str, Any], base_resume_details: Resume):
 
                 if is_valid:
                     logging.info(f"Customization for section {section_name} is valid. Reason: {reason}")
-                    # Set the personalized content
                     setattr(personalized_resume_data, section_name, personalized_content)
-                    # Update the copied resume data
                     sections_to_personalize[section_name] = personalized_content
                 else:
                     logging.warning(f"VALIDATION FAILED for section {section_name} for job_id {job_id}. Reason: {reason}")
                     logging.warning(f"Falling back to original {section_name} content for job_id {job_id}.")
-                    # Note: We NO LONGER abort the entire job generation here. 
-                    # We just skip updating the personalized_resume_data for this section, effectively falling back.
-                    # any_validation_failed = True 
-                    # break;  
 
                 logging.info(f"Finished processing section: {section_name} for job_id: {job_id}")
             else:
-                 logging.info(f"Skipping empty section: {section_name} for job_id: {job_id}")
-
-        # --- Check if any validation failed before proceeding ---
-        if any_validation_failed:
-            logging.info(f"--- Aborting PDF generation and further processing for job_id: {job_id} due to validation failure. ---")
-            return 
+                logging.info(f"Skipping empty section: {section_name} for job_id: {job_id}")
 
         # 2. Generate PDF
         logging.info(f"Generating PDF for job_id: {job_id}")
         try:
-            pdf_bytes = pdf_generator.create_resume_pdf(personalized_resume_data)
+            pdf_bytes = pdf_generator.create_resume_pdf(
+                personalized_resume_data,
+                header_title=str(job_details.get("job_title") or "").strip(),
+            )
             if not pdf_bytes:
                  raise ValueError("PDF generation returned empty bytes.")
             logging.info(f"PDF generation complete for job_id: {job_id}")
@@ -420,8 +434,10 @@ async def process_job(job_details: Dict[str, Any], base_resume_details: Resume):
             return # Stop processing this job
 
         # 3. Upload PDF to Supabase Storage
-        # Construct a unique path, e.g., using job_id
-        destination_path = f"resume_{job_id}.pdf"
+        destination_path = _build_resume_filename(
+            job_id=str(job_id),
+            company=job_details.get("company"),
+        )
         logging.info(f"Uploading PDF to {destination_path} for job_id: {job_id}")
         resume_path = supabase_utils.upload_customized_resume_to_storage(pdf_bytes, destination_path)
 
@@ -453,7 +469,11 @@ async def process_job(job_details: Dict[str, Any], base_resume_details: Resume):
         logging.error(f"An unexpected error occurred while processing job_id {job_id}: {e}", exc_info=True)
         # Log the error but continue to the next job
 
-async def run_job_processing_cycle():
+async def run_job_processing_cycle(
+    limit_override: int | None = None,
+    target_job_id: str | None = None,
+    force_regenerate: bool = False,
+):
     """
     Fetches top jobs and processes them one by one.
     """
@@ -497,27 +517,133 @@ async def run_job_processing_cycle():
         return # Abort cycle if base resume is invalid
 
     # 2. Fetch Top Jobs to Process
-    jobs_limit = config.JOBS_TO_CUSTOMIZE_PER_RUN
-    logging.info(f"Fetching top {jobs_limit} scored jobs to apply for...")
-    jobs_to_process = supabase_utils.get_top_scored_jobs_for_resume_generation(limit=jobs_limit)
+    jobs_limit = limit_override if limit_override is not None else config.JOBS_TO_CUSTOMIZE_PER_RUN
 
-    if not jobs_to_process:
-        logging.info("No new jobs found to process in this cycle.")
+    if force_regenerate and not target_job_id:
+        raise SystemExit("--force-regenerate requires --job-id.")
+
+    if target_job_id:
+        if limit_override is not None:
+            logging.info(
+                f"--job-id {target_job_id} provided. Ignoring --limit {limit_override} and targeting this job directly."
+            )
+        logging.info(f"Manual job selection detected for job_id {target_job_id}.")
+        job_record = supabase_utils.get_job_by_id(target_job_id)
+        if not job_record:
+            logging.error(f"Could not find job_id {target_job_id}.")
+            return
+
+        existing_resume_id = str(job_record.get("customized_resume_id") or "").strip()
+        if existing_resume_id and not force_regenerate:
+            logging.info(
+                f"job_id {target_job_id} already has a generated resume ({existing_resume_id}). "
+                "Re-run with --force-regenerate to create a new one and relink the job."
+            )
+            return
+
+        if existing_resume_id and force_regenerate:
+            logging.info(
+                f"Force regenerate enabled for job_id {target_job_id}. "
+                "A new customized resume will be created and linked to this job."
+            )
+
+        await process_job(job_record, base_resume_details)
+        logging.info("Finished job processing cycle.")
         return
 
-    logging.info(f"Found {len(jobs_to_process)} jobs to process.")
+    manual_limit_mode = limit_override is not None
+    min_score_for_custom = int(getattr(config, "MIN_SCORE_FOR_CUSTOM_RESUME", 50))
+    effective_min_score = 0 if manual_limit_mode else min_score_for_custom
+    top_percent = 0 if manual_limit_mode else (getattr(config, "JOBS_TO_CUSTOMIZE_TOP_PERCENT", 0) or 0)
 
-    # 3. Process Each Job Sequentially (to avoid overwhelming Gemini/resources)
+    if manual_limit_mode:
+        logging.info(
+            f"Manual limit override detected ({limit_override}). "
+            "Selecting the next highest not-yet-generated jobs regardless of MIN_SCORE_FOR_CUSTOM_RESUME."
+        )
+
+    if top_percent > 0:
+        eligible_count = supabase_utils.count_jobs_for_resume_generation_candidates(min_score=min_score_for_custom)
+        if eligible_count > 0:
+            jobs_limit = max(1, math.ceil((eligible_count * top_percent) / 100.0))
+            logging.info(
+                f"Top-percent mode enabled: {top_percent}% of {eligible_count} eligible jobs => {jobs_limit} jobs "
+                f"(min score {min_score_for_custom})."
+            )
+        else:
+            jobs_limit = 0
+            logging.info("Top-percent mode enabled but no eligible jobs found.")
+
+    logging.info(f"Fetching top {jobs_limit} scored jobs to apply for...")
+    jobs_to_process = supabase_utils.get_top_scored_jobs_for_resume_generation(limit=jobs_limit)
+    if jobs_to_process and effective_min_score > 0:
+        filtered_jobs = []
+        for job in jobs_to_process:
+            score_val = job.get("resume_score")
+            if score_val is None:
+                continue
+            try:
+                if int(score_val) >= effective_min_score:
+                    filtered_jobs.append(job)
+            except (TypeError, ValueError):
+                continue
+        jobs_to_process = filtered_jobs
+
+    if not jobs_to_process:
+        if effective_min_score > 0:
+            logging.info(
+                f"No new jobs found to process in this cycle with score >= {effective_min_score}."
+            )
+        else:
+            logging.info("No new jobs found to process in this cycle.")
+        return
+
+    if effective_min_score > 0:
+        logging.info(
+            f"Found {len(jobs_to_process)} jobs to process with score >= {effective_min_score}."
+        )
+    else:
+        logging.info(f"Found {len(jobs_to_process)} jobs to process.")
+
+    # 3. Process each job sequentially to avoid overwhelming LLM/resources
     for job_details in jobs_to_process:
-        await process_job(job_details, base_resume_details) # Pass base resume
+        await process_job(job_details, base_resume_details)
 
     logging.info("Finished job processing cycle.")
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Generate customized resumes for top scored jobs.")
+    parser.add_argument(
+        "--limit",
+        type=int,
+        help="Override how many top jobs to customize in this run.",
+    )
+    parser.add_argument(
+        "--job-id",
+        help="Generate a resume for one specific job_id. Ignores --limit and score threshold filters.",
+    )
+    parser.add_argument(
+        "--force-regenerate",
+        action="store_true",
+        help="With --job-id, create a new resume even if that job already has one linked.",
+    )
+    return parser
+
 
 # --- Script Entry Point ---
 if __name__ == "__main__":
     logging.info("Script started.")
     try:
-        asyncio.run(run_job_processing_cycle())
+        args = build_parser().parse_args()
+        if args.limit is not None and args.limit <= 0:
+            raise SystemExit("--limit must be a positive integer.")
+        asyncio.run(
+            run_job_processing_cycle(
+                limit_override=args.limit,
+                target_job_id=args.job_id,
+                force_regenerate=args.force_regenerate,
+            )
+        )
         logging.info("Rresume processing completed successfully.")
     except Exception as e:
         logging.error(f"Error during task execution: {e}", exc_info=True)

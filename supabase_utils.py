@@ -126,27 +126,43 @@ def get_jobs_to_score(limit: int) -> list:
     Selects only necessary fields (job_id, job_title, description).
     Orders by scraped_at ascending to process older jobs first.
     """
-    if limit <= 0:
-        logging.warning("Limit for jobs to score must be positive.")
-        return []
-
     try:
-        logging.info(f"Fetching up to {limit} jobs needing scoring...")
-        # Select fields needed for scoring
-        response = supabase.table(config.SUPABASE_TABLE_NAME)\
-                           .select("job_id, job_title, company, description, level")\
-                           .eq("is_active", True)\
-                           .is_("resume_score", None)\
-                           .order("scraped_at", desc=False)\
-                           .limit(limit)\
-                           .execute()
+        base_query = (
+            supabase.table(config.SUPABASE_TABLE_NAME)
+            .select("job_id, job_title, company, description, level")
+            .eq("is_active", True)
+            .is_("resume_score", None)
+            .order("scraped_at", desc=False)
+        )
 
-        if response.data:
-            logging.info(f"Successfully fetched {len(response.data)} jobs to score.")
-            return response.data
-        else:
+        if limit > 0:
+            logging.info(f"Fetching up to {limit} jobs needing scoring...")
+            response = base_query.limit(limit).execute()
+            if response.data:
+                logging.info(f"Successfully fetched {len(response.data)} jobs to score.")
+                return response.data
             logging.info("No jobs found needing scoring at this time.")
             return []
+
+        logging.info("Fetching all unscored jobs needing scoring...")
+        all_rows: list[dict] = []
+        offset = 0
+        batch_size = 1000
+        while True:
+            response = base_query.range(offset, offset + batch_size - 1).execute()
+            rows = response.data or []
+            if not rows:
+                break
+            all_rows.extend(rows)
+            if len(rows) < batch_size:
+                break
+            offset += batch_size
+
+        if all_rows:
+            logging.info(f"Successfully fetched {len(all_rows)} jobs to score.")
+            return all_rows
+        logging.info("No jobs found needing scoring at this time.")
+        return []
 
     except Exception as e:
         logging.error(f"Error fetching jobs to score from Supabase: {e}")
@@ -217,6 +233,27 @@ def get_top_scored_jobs_for_resume_generation(limit: int) -> list:
         logging.error(f"Error fetching top-scored jobs to apply for from Supabase RPC: {e}")
         return []
 
+def count_jobs_for_resume_generation_candidates(min_score: int = 50) -> int:
+    """
+    Returns how many jobs are currently eligible for custom resume generation.
+    Mirrors the core filters used by get_jobs_for_resume_generation_custom_sort RPC.
+    """
+    try:
+        response = (
+            supabase.table(config.SUPABASE_TABLE_NAME)
+            .select("job_id")
+            .eq("is_active", True)
+            .eq("status", "new")
+            .eq("job_state", "new")
+            .gte("resume_score", min_score)
+            .is_("customized_resume_id", None)
+            .execute()
+        )
+        return len(response.data or [])
+    except Exception as e:
+        logging.error(f"Error counting jobs for resume generation candidates: {e}")
+        return 0
+
 def get_jobs_to_rescore(limit: int) -> list:
     """
     Fetches jobs from Supabase that are ready for re-scoring with a custom resume.
@@ -224,16 +261,16 @@ def get_jobs_to_rescore(limit: int) -> list:
     Orders by resume_score descending.
     Selects fields needed for the re-scoring process.
     """
-    if limit <= 0:
-        logging.warning("Limit for jobs to rescore must be positive.")
-        return []
-
     try:
-        logging.info(f"Fetching up to {limit} jobs for re-scoring via RPC...")
+        effective_limit = limit if limit > 0 else 1000
+        if limit > 0:
+            logging.info(f"Fetching up to {limit} jobs for re-scoring via RPC...")
+        else:
+            logging.info("Fetching all jobs ready for re-scoring via RPC (capped at 1000)...")
         # Note: We updated the RPC to also return customized_resume_id
         response = supabase.rpc(
             "get_jobs_for_rescore", 
-            {"p_limit_val": limit}   
+            {"p_limit_val": effective_limit}
         ).execute()
 
         if hasattr(response, 'data') and response.data is not None:
@@ -314,7 +351,10 @@ def get_job_by_id(job_id: str) -> dict | None:
     try:
         logging.info(f"Fetching job details for job_id: {job_id} from table '{config.SUPABASE_TABLE_NAME}'")
         response = supabase.table(config.SUPABASE_TABLE_NAME)\
-                           .select("company, job_title, level, description")\
+                           .select(
+                               "job_id, company, job_title, level, description, "
+                               "resume_score, customized_resume_id, status, job_state, is_active"
+                           )\
                            .eq("job_id", job_id) \
                            .limit(1)\
                            .execute() # Assuming 'job_id' is the column name
@@ -395,8 +435,8 @@ def update_job_with_resume_link(job_id: str, customized_resume_id: str,  new_sta
 
     try:
         update_data = {"customized_resume_id": customized_resume_id}
-        # if new_status:
-        #     update_data["job_state"] = new_status # Assuming 'status' is your column name
+        if new_status:
+            update_data["status"] = new_status
 
         logging.info(f"Updating job {job_id} with resume link, resume id and status '{new_status or 'unchanged'}'...")
 
@@ -418,6 +458,37 @@ def update_job_with_resume_link(job_id: str, customized_resume_id: str,  new_sta
     except Exception as e:
         logging.error(f"Error updating job {job_id} in Supabase: {e}")
         return False
+
+def mark_jobs_as_applied(job_ids: list[str]) -> tuple[int, int]:
+    """
+    Marks jobs as applied and sets application_date to current UTC timestamp.
+
+    Args:
+        job_ids: List of job_id values to update.
+
+    Returns:
+        A tuple of (updated_count, requested_count).
+    """
+    cleaned_ids = [str(j).strip() for j in (job_ids or []) if str(j).strip()]
+    if not cleaned_ids:
+        logging.warning("No valid job IDs provided to mark as applied.")
+        return 0, 0
+
+    try:
+        now_utc = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        response = (
+            supabase.table(config.SUPABASE_TABLE_NAME)
+            .update({"status": "applied", "application_date": now_utc})
+            .in_("job_id", cleaned_ids)
+            .execute()
+        )
+
+        updated_count = len(response.data) if getattr(response, "data", None) else 0
+        logging.info(f"Marked {updated_count}/{len(cleaned_ids)} jobs as applied.")
+        return updated_count, len(cleaned_ids)
+    except Exception as e:
+        logging.error(f"Error marking jobs as applied: {e}")
+        return 0, len(cleaned_ids)
 
 def save_customized_resume(resume_data: 'Resume', resume_path: str) -> Optional[Any]: # Return type changed
     """
@@ -632,4 +703,3 @@ def get_base_resume() -> Optional[dict]:
     except Exception as e:
         logging.error(f"Error fetching base resume from Supabase: {e}", exc_info=True)
         return None
-
