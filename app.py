@@ -122,10 +122,15 @@ def _build_command(action: str, job_id: str | None, count: int | None) -> tuple[
     if action == "score":
         return "Score Jobs", [python, "score_jobs.py"]
     if action == "generate_next":
+        return (
+            "Generate Next Resume",
+            [python, "custom_resume_generator.py", "--flow", "two_step_ai", "--limit", "1"],
+        )
+    if action == "generate_selected":
         if count is None or count <= 0:
             raise ValueError("Resume count must be a positive number.")
         return (
-            f"Generate Next {count} Resume{'s' if count != 1 else ''}",
+            f"Generate {count} Selected Resume{'s' if count != 1 else ''}",
             [python, "custom_resume_generator.py", "--flow", "two_step_ai", "--limit", str(count)],
         )
     if action == "cleanup":
@@ -211,7 +216,7 @@ def _fetch_all_jobs(batch_size: int = 500) -> tuple[list[dict], str | None]:
             response = (
                 supabase_utils.supabase.table(config.SUPABASE_TABLE_NAME)
                 .select(
-                    "job_id, company, job_title, location, provider, status, "
+                    "job_id, company, job_title, location, provider, status, application_date, "
                     "resume_score, scraped_at, customized_resume_id"
                 )
                 .order("scraped_at", desc=True)
@@ -282,6 +287,19 @@ def status():
 @app.get("/data")
 def data():
     return jsonify(_fetch_dashboard_data())
+
+
+@app.post("/jobs/<job_id>/applied")
+def mark_job_applied(job_id: str):
+    cleaned_job_id = str(job_id or "").strip()
+    if not cleaned_job_id:
+        return jsonify({"ok": False, "error": "Job ID is required."}), 400
+
+    updated, requested = supabase_utils.mark_jobs_as_applied([cleaned_job_id])
+    if updated <= 0:
+        return jsonify({"ok": False, "error": f"Could not mark job {cleaned_job_id} as applied."}), 400
+
+    return jsonify({"ok": True, "updated": updated, "requested": requested, "job_id": cleaned_job_id})
 
 
 @app.get("/resume/<resume_id>/download")

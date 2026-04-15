@@ -289,6 +289,13 @@ def _apply_two_step_rewrite_to_resume(
     return personalized_resume
 
 
+def _normalize_header_title(raw_title: Any, rewritten_title: Any) -> str:
+    cleaned_rewritten = str(rewritten_title or "").strip()
+    if cleaned_rewritten:
+        return " ".join(cleaned_rewritten.split())
+    return str(raw_title or "").strip()
+
+
 async def rewrite_resume_with_keyword_plan(
     full_resume: Resume,
     job_details: Dict[str, Any],
@@ -335,6 +342,11 @@ async def rewrite_resume_with_keyword_plan(
     - Do not force every keyword into every section.
     - If an important hard skill from the first pass is missing from the current wording, prefer to incorporate it into the summary or skills section before dropping it entirely.
     - The resume should visibly reflect the first-pass keyword list, not just vaguely align with it.
+    - Create a clean header_title for the resume subtitle based on the target job title.
+    - The header_title should be human-readable and professional.
+    - Remove noisy job-board text such as salaries, locations, "Hiring", IDs, company/internal prefixes, or awkward separators when they do not belong in a resume title.
+    - Preserve meaningful stack or specialization signals such as Java, React, Backend, Full-Stack, or Software Engineer when they are part of the real role title.
+    - If the original target title already looks clean and professional, keep it close to the original meaning.
 
     Summary
     - Write the professional summary as one concise paragraph.
@@ -386,7 +398,7 @@ async def rewrite_resume_with_keyword_plan(
     - Avoid keyword stuffing, awkward phrasing, and buzzword clustering.
 
     Output scope
-    - Return only the sections requested by the schema: summary, skills, experience, and projects.
+    - Return only the fields requested by the schema: header_title, summary, skills, experience, and projects.
     """
 
     system_prompt = """
@@ -399,6 +411,7 @@ async def rewrite_resume_with_keyword_plan(
     - Do not output markdown, commentary, or extra text.
     - Base resume facts are the source of truth for concrete jobs, projects, dates, companies, and measurable claims.
     - The keyword plan contains user-verified hard_skills and soft_skills that are allowed to be used in the rewrite, even if the current base resume wording does not mention every one of them explicitly.
+    - The header_title must be a cleaned, professional version of the target job title suitable for a resume subtitle.
     - Never invent fake experience or project claims that are not evidenced by the base resume.
     - Optimize for both ATS match and human credibility.
     - Write like an experienced real resume writer: concise, specific, relevant, and natural.
@@ -418,7 +431,7 @@ async def rewrite_resume_with_keyword_plan(
 async def personalize_resume_with_two_step_ai(
     base_resume_details: Resume,
     job_details: Dict[str, Any],
-) -> Resume:
+) -> tuple[Resume, str]:
     """
     Two-step AI-only resume generation flow:
     1. Generate keyword plan from the job description.
@@ -462,7 +475,12 @@ async def personalize_resume_with_two_step_ai(
             f"Two-step AI validation passed for section {section_name}. Reason: {reason}"
         )
 
-    return personalized_resume_data
+    header_title = _normalize_header_title(
+        raw_title=job_details.get("job_title"),
+        rewritten_title=rewritten_resume.header_title,
+    )
+
+    return personalized_resume_data, header_title
 
 
 async def personalize_section_with_llm(
@@ -782,11 +800,12 @@ async def process_job(
 
     try:
         # 1. Personalize Resume Sections
+        header_title = str(job_details.get("job_title") or "").strip()
         if generation_flow == "two_step_ai":
             logging.info(
                 f"Using two-step AI resume generation flow for job_id: {job_id}"
             )
-            personalized_resume_data = await personalize_resume_with_two_step_ai(
+            personalized_resume_data, header_title = await personalize_resume_with_two_step_ai(
                 base_resume_details=base_resume_details,
                 job_details=job_details,
             )
@@ -843,7 +862,14 @@ async def process_job(
         # 2. Generate PDF
         logging.info(f"Generating PDF for job_id: {job_id}")
         try:
-            header_title = str(job_details.get("job_title") or "").strip()
+            raw_header_title = str(job_details.get("job_title") or "").strip()
+            if raw_header_title and header_title != raw_header_title:
+                logging.info(
+                    "LLM-normalized resume header title for job_id %s: '%s' -> '%s'",
+                    job_id,
+                    raw_header_title,
+                    header_title,
+                )
             pdf_bytes = pdf_generator.create_resume_pdf(
                 personalized_resume_data,
                 header_title=header_title,

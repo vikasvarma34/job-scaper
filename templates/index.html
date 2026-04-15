@@ -3,22 +3,17 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Job Pipeline Dashboard</title>
+    <title>Vikas Pokala Job Application</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
   </head>
   <body>
     <main class="page-shell">
       <section class="hero-panel">
         <div>
-          <p class="eyebrow">Resume Ops Dashboard</p>
-          <h1>Job Pipeline Dashboard</h1>
+          <h1>Vikas Pokala Job Application</h1>
           <p class="hero-copy">
             Scrape, score, generate, and track every job from one clean dashboard.
           </p>
-        </div>
-        <div class="hero-note">
-          <p class="hero-note-label">Resume generation rule</p>
-          <p class="hero-note-copy">Generate by job ID automatically regenerates if that job already has a customized resume.</p>
         </div>
       </section>
 
@@ -76,12 +71,20 @@
             <button data-action="cleanup" class="action-button danger">Cleanup</button>
           </div>
           <div class="job-runner">
+            <label class="field-label" for="resume-count-input">Generate Selected Number Of Resumes</label>
+            <div class="job-runner-row">
+              <input id="resume-count-input" class="job-input" type="number" min="1" step="1" placeholder="Enter number like 5">
+              <button data-action="generate_selected" class="action-button">Generate Selected Resumes</button>
+            </div>
+            <p class="helper-text">Generate Next Resume creates only the single highest-scored job without a customized resume. Use the number field when you want more than one.</p>
+          </div>
+          <div class="job-runner">
             <label class="field-label" for="job-id-input">Generate With Job ID</label>
             <div class="job-runner-row">
               <input id="job-id-input" class="job-input" type="text" placeholder="Enter job id like 4400767090">
               <button data-action="generate_job" class="action-button dark">Generate With ID</button>
             </div>
-            <p class="helper-text">Generate Next Resume always starts with the highest-scored jobs that do not already have a customized resume. Generate With ID automatically regenerates if that job already has one.</p>
+            <p class="helper-text">Generate With ID automatically regenerates if that job already has one.</p>
           </div>
         </article>
       </section>
@@ -159,6 +162,11 @@
                       {% if job.resume_download_url %}
                         <a href="{{ job.resume_download_url }}">Download Resume</a>
                       {% endif %}
+                      {% if job.status != "applied" %}
+                        <button class="mini-button" data-mark-applied="true" data-job-id="{{ job.job_id }}">Mark Applied</button>
+                      {% else %}
+                        <span class="applied-label">Applied</span>
+                      {% endif %}
                     </div>
                   </td>
                 </tr>
@@ -177,12 +185,14 @@
       const statusUrl = "{{ url_for('status') }}";
       const dataUrl = "{{ url_for('data') }}";
       const runUrl = "{{ url_for('run_action') }}";
+      const jobsBaseUrl = "/jobs";
       const logOutput = document.getElementById("log-output");
       const taskLabel = document.getElementById("task-label");
       const taskStatus = document.getElementById("task-status");
       const taskCommand = document.getElementById("task-command");
       const taskTiming = document.getElementById("task-timing");
       const jobIdInput = document.getElementById("job-id-input");
+      const resumeCountInput = document.getElementById("resume-count-input");
       const refreshButton = document.getElementById("refresh-button");
       const jobsBody = document.getElementById("jobs-body");
       const jobsError = document.getElementById("jobs-error");
@@ -196,7 +206,8 @@
       const actionLabels = {
         scrape: "scrape jobs",
         score: "score jobs",
-        generate_next: "generate resumes for the highest-scored jobs without customized resumes",
+        generate_next: "generate the next highest-scored resume",
+        generate_selected: "generate the selected number of highest-scored resumes",
         cleanup: "run cleanup",
         generate_job: "generate a resume for this job ID"
       };
@@ -296,6 +307,11 @@
           if (job.resume_download_url) {
             links.push(`<a href="${escapeHtml(job.resume_download_url)}">Download Resume</a>`);
           }
+          if (String(job.status || "").toLowerCase() !== "applied" && job.job_id) {
+            links.push(`<button class="mini-button" data-mark-applied="true" data-job-id="${escapeHtml(job.job_id)}">Mark Applied</button>`);
+          } else if (String(job.status || "").toLowerCase() === "applied") {
+            links.push(`<span class="applied-label">Applied</span>`);
+          }
 
           return `
             <tr>
@@ -315,6 +331,13 @@
             </tr>
           `;
         }).join("");
+        bindAppliedButtons();
+      }
+
+      function bindAppliedButtons() {
+        document.querySelectorAll("[data-mark-applied='true']").forEach((button) => {
+          button.addEventListener("click", () => markApplied(button.dataset.jobId));
+        });
       }
 
       async function loadStatus() {
@@ -349,6 +372,30 @@
         await loadData();
       }
 
+      async function markApplied(jobId) {
+        if (!jobId) {
+          return;
+        }
+
+        const isConfirmed = window.confirm(`Mark job ${jobId} as applied?`);
+        if (!isConfirmed) {
+          return;
+        }
+
+        const response = await fetch(`${jobsBaseUrl}/${encodeURIComponent(jobId)}/applied`, {
+          method: "POST",
+          headers: { "Accept": "application/json" }
+        });
+        const payload = await response.json();
+        if (!response.ok) {
+          alert(payload.error || "Failed to mark job as applied.");
+          return;
+        }
+
+        await refreshDashboard();
+        scheduleRefreshLoop();
+      }
+
       function scheduleRefreshLoop() {
         if (refreshTimer) {
           window.clearTimeout(refreshTimer);
@@ -369,9 +416,10 @@
           return;
         }
 
-        if (action === "generate_next") {
-          count = window.prompt("How many top resumes do you want to generate?", "10") || "";
-          if (!count.trim()) {
+        if (action === "generate_selected") {
+          count = resumeCountInput.value.trim();
+          if (!count) {
+            alert("Enter how many resumes you want to generate.");
             return;
           }
           const parsed = Number.parseInt(count, 10);
@@ -383,7 +431,7 @@
         }
 
         const actionLabel = actionLabels[action] || "run this action";
-        const details = action === "generate_next"
+        const details = action === "generate_selected"
           ? ` for ${count} resume${count === "1" ? "" : "s"}`
           : (jobId ? ` for job ${jobId}` : "");
         const isConfirmed = window.confirm(`Are you sure you want to ${actionLabel}${details}?`);

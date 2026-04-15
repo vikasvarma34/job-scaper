@@ -75,6 +75,7 @@ class ATSKeywordPlan(BaseModel):
 
 
 class ATSResumeRewriteOutput(BaseModel):
+    header_title: str = ""
     summary: str
     skills: List[str] = Field(default_factory=list)
     experience: List[Experience] = Field(default_factory=list)
