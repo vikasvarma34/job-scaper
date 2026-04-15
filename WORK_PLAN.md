@@ -71,10 +71,21 @@ Improve prompting carefully.
 
 ## Notes For Tomorrow
 
-- Start by reviewing scraping
-- Then move to scoring
-- Then redesign resume generation into 2 AI calls
-- Then improve PDF output
+- Do not spend more time on scraping for now
+- Do not spend more time on scoring for now
+- Focus only on:
+  - changing the resume-generation flow
+  - improving prompts
+  - improving PDF styling/output
+- Review the exact prompt currently used for section rewriting
+- Review how the resume content is being rewritten section by section
+- Review how the PDF is being styled/generated
+- Make the PDF ATS-friendly and cleaner
+- Remove awkward spacing issues in the PDF
+- Improve keyword placement across the resume naturally
+- Use LLM only for keyword creation
+- Do not reintroduce local keyword logic
+- Keep prompts simple and focused so the output does not get worse
 
 ## Important Files
 
@@ -92,4 +103,14 @@ Improve prompting carefully.
 
 - Resume generation is legacy-only now
 - Keyword-targeting logic was removed
-- Next focus is scraping, then scoring, then the new 2-step AI resume flow
+- Scraping flow and scoring flow are good enough for now
+- Main problems now are:
+  - the PDF look/format
+  - the rewritten section quality
+  - school/education section quality
+  - spacing issues in the generated resume
+- Tomorrow's focus is only:
+  - prompt quality
+  - resume-generation flow
+  - ATS-friendly PDF styling
+  - LLM-only keyword generation and natural keyword distribution

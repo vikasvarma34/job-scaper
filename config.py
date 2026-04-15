@@ -159,14 +159,14 @@ LINKEDIN_F_WT = None # Set 1=Onsite, 2=Remote, 3=Hybrid, or None for all
 # Prefilter controls to reduce wasted detail-fetch calls.
 LINKEDIN_PREFILTER_BY_TITLE_BEFORE_DETAILS = True
 # Use an LLM pass to rank broader LinkedIn card results before detail fetch.
-LINKEDIN_ENABLE_LLM_TITLE_PREFILTER = True
+LINKEDIN_ENABLE_LLM_TITLE_PREFILTER = False
 LINKEDIN_LLM_PREFILTER_CANDIDATE_CAP = 180
 LINKEDIN_LLM_PREFILTER_TOP_K = 80
 # Final shortlist controls (applied after gathering candidate pool across queries).
 LINKEDIN_FINAL_SHORTLIST_CANDIDATE_LIMIT = 320
 LINKEDIN_MAX_JOBS_PER_COMPANY_PER_RUN = 3
 LINKEDIN_STRICT_COMPANY_DIVERSITY = False
-LINKEDIN_ENABLE_LLM_FINAL_SHORTLIST = True
+LINKEDIN_ENABLE_LLM_FINAL_SHORTLIST = False
 LINKEDIN_LLM_FINAL_SHORTLIST_CANDIDATE_CAP = 240
 
 CAREERS_FUTURE_SEARCH_QUERIES = ["IT Support", "Full Stack Web Developer", "Application Support", "Cybersecurity Analyst", "fresher developer"]
