@@ -216,7 +216,7 @@ def _fetch_all_jobs(batch_size: int = 500) -> tuple[list[dict], str | None]:
             response = (
                 supabase_utils.supabase.table(config.SUPABASE_TABLE_NAME)
                 .select(
-                    "job_id, company, job_title, location, provider, status, application_date, "
+                    "job_id, company, job_title, description, location, provider, status, application_date, "
                     "resume_score, scraped_at, customized_resume_id"
                 )
                 .order("scraped_at", desc=True)

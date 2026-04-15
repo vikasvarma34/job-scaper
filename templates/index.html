@@ -71,12 +71,12 @@
             <button data-action="cleanup" class="action-button danger">Cleanup</button>
           </div>
           <div class="job-runner">
-            <label class="field-label" for="resume-count-input">Generate Selected Number Of Resumes</label>
+            <label class="field-label" for="resume-count-input">Generate Selected Number of Resumes</label>
             <div class="job-runner-row">
               <input id="resume-count-input" class="job-input" type="number" min="1" step="1" placeholder="Enter number like 5">
-              <button data-action="generate_selected" class="action-button">Generate Selected Resumes</button>
+              <button data-action="generate_selected" class="action-button">Generate Selected Number of Resumes</button>
             </div>
-            <p class="helper-text">Generate Next Resume creates only the single highest-scored job without a customized resume. Use the number field when you want more than one.</p>
+            <p class="helper-text">Generate Next Resume creates only the single highest-scored job without a customized resume. Use the number field when you want to generate more than one.</p>
           </div>
           <div class="job-runner">
             <label class="field-label" for="job-id-input">Generate With Job ID</label>
@@ -159,6 +159,14 @@
                       {% if job.job_url %}
                         <a href="{{ job.job_url }}" target="_blank" rel="noreferrer">Open Job</a>
                       {% endif %}
+                      <button
+                        class="mini-button secondary"
+                        data-copy-jd="true"
+                        data-job-title="{{ job.job_title or '' }}"
+                        data-job-description="{{ job.description or '' }}"
+                      >
+                        Copy JD
+                      </button>
                       {% if job.resume_download_url %}
                         <a href="{{ job.resume_download_url }}">Download Resume</a>
                       {% endif %}
@@ -304,6 +312,9 @@
           if (job.job_url) {
             links.push(`<a href="${escapeHtml(job.job_url)}" target="_blank" rel="noreferrer">Open Job</a>`);
           }
+          links.push(
+            `<button class="mini-button secondary" data-copy-jd="true" data-job-title="${escapeHtml(job.job_title || "")}" data-job-description="${escapeHtml(job.description || "")}">Copy JD</button>`
+          );
           if (job.resume_download_url) {
             links.push(`<a href="${escapeHtml(job.resume_download_url)}">Download Resume</a>`);
           }
@@ -332,11 +343,18 @@
           `;
         }).join("");
         bindAppliedButtons();
+        bindCopyJdButtons();
       }
 
       function bindAppliedButtons() {
         document.querySelectorAll("[data-mark-applied='true']").forEach((button) => {
           button.addEventListener("click", () => markApplied(button.dataset.jobId));
+        });
+      }
+
+      function bindCopyJdButtons() {
+        document.querySelectorAll("[data-copy-jd='true']").forEach((button) => {
+          button.addEventListener("click", () => copyJobDescription(button));
         });
       }
 
@@ -396,6 +414,23 @@
         scheduleRefreshLoop();
       }
 
+      async function copyJobDescription(button) {
+        const jobTitle = button.dataset.jobTitle || "";
+        const jobDescription = button.dataset.jobDescription || "";
+        const copyText = `Job title: ${jobTitle}\nJob description: ${jobDescription}`;
+
+        try {
+          await navigator.clipboard.writeText(copyText);
+          const originalText = button.textContent;
+          button.textContent = "Copied";
+          window.setTimeout(() => {
+            button.textContent = originalText;
+          }, 1200);
+        } catch (error) {
+          alert("Could not copy the job description.");
+        }
+      }
+
       function scheduleRefreshLoop() {
         if (refreshTimer) {
           window.clearTimeout(refreshTimer);
@@ -433,7 +468,9 @@
         const actionLabel = actionLabels[action] || "run this action";
         const details = action === "generate_selected"
           ? ` for ${count} resume${count === "1" ? "" : "s"}`
-          : (jobId ? ` for job ${jobId}` : "");
+          : action === "generate_next"
+            ? " for the next available job"
+            : (jobId ? ` for job ${jobId}` : "");
         const isConfirmed = window.confirm(`Are you sure you want to ${actionLabel}${details}?`);
         if (!isConfirmed) {
           return;
