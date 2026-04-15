@@ -10,6 +10,62 @@ from models import Resume
 
 logging.basicConfig(level=logging.INFO)
 
+
+def _append_bullet_lines(target_story: list, text: str, style_bullet: ParagraphStyle):
+    """
+    Render newline-separated text as bullet paragraphs.
+    Falls back to sentence splitting when a plain paragraph is provided.
+    """
+    if not text or text == "NA":
+        return
+
+    if "\n" in text:
+        bullets = text.split("\n")
+        for bullet in bullets:
+            if bullet.strip():
+                bullet_text = bullet.strip()
+                if not bullet_text.startswith("-") and not bullet_text.startswith("•"):
+                    bullet_text = f"• {bullet_text}"
+                elif bullet_text.startswith("-"):
+                    bullet_text = f"• {bullet_text[1:].strip()}"
+                target_story.append(Paragraph(bullet_text, style_bullet))
+        return
+
+    normalized = text.strip()
+    normalized = normalized.replace("e.g.", "TEMP_EG")
+    normalized = normalized.replace("i.e.", "TEMP_IE")
+    normalized = normalized.replace("etc.", "TEMP_ETC")
+    normalized = normalized.replace("vs.", "TEMP_VS")
+    normalized = normalized.replace("Mr.", "TEMP_MR")
+    normalized = normalized.replace("Mrs.", "TEMP_MRS")
+    normalized = normalized.replace("Ms.", "TEMP_MS")
+    normalized = normalized.replace("Dr.", "TEMP_DR")
+    normalized = normalized.replace("St.", "TEMP_ST")
+    normalized = normalized.replace("Ph.D.", "TEMP_PHD")
+    normalized = normalized.replace("U.S.", "TEMP_US")
+    normalized = normalized.replace("U.K.", "TEMP_UK")
+
+    sentences = normalized.split(". ")
+    for i, sentence in enumerate(sentences):
+        if sentence:
+            sentence = sentence.replace("TEMP_EG", "e.g.")
+            sentence = sentence.replace("TEMP_IE", "i.e.")
+            sentence = sentence.replace("TEMP_ETC", "etc.")
+            sentence = sentence.replace("TEMP_VS", "vs.")
+            sentence = sentence.replace("TEMP_MR", "Mr.")
+            sentence = sentence.replace("TEMP_MRS", "Mrs.")
+            sentence = sentence.replace("TEMP_MS", "Ms.")
+            sentence = sentence.replace("TEMP_DR", "Dr.")
+            sentence = sentence.replace("TEMP_ST", "St.")
+            sentence = sentence.replace("TEMP_PHD", "Ph.D.")
+            sentence = sentence.replace("TEMP_US", "U.S.")
+            sentence = sentence.replace("TEMP_UK", "U.K.")
+
+            if i < len(sentences) - 1 or sentence[-1] not in [".", "!", "?"]:
+                sentence = sentence + "."
+
+            target_story.append(Paragraph(f"• {sentence.strip()}", style_bullet))
+
 def create_resume_pdf(resume_data: Resume, header_title: str | None = None) -> bytes:
     """
     Generates an ATS-friendly PDF resume with improved design from the provided Resume data object.
@@ -188,7 +244,10 @@ def create_resume_pdf(resume_data: Resume, header_title: str | None = None) -> b
         cleaned_summary = resume_data.summary
         if cleaned_summary.startswith('"') and cleaned_summary.endswith('"'):
             cleaned_summary = cleaned_summary[1:-1]
-            
+
+        cleaned_summary = " ".join(
+            part.strip() for part in cleaned_summary.splitlines() if part.strip()
+        )
         story.append(Paragraph(cleaned_summary, style_normal))
     
     # --- Skills ---
@@ -197,45 +256,46 @@ def create_resume_pdf(resume_data: Resume, header_title: str | None = None) -> b
         skills_list = [s for s in resume_data.skills if s != "NA"]
         
         if skills_list:
-            story.append(Paragraph("SKILLS", style_section_heading))
+            story.append(Paragraph("PROFESSIONAL SKILLS", style_section_heading))
             story.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor('#000000'), spaceBefore=0, spaceAfter=8))
-            
-            num_columns = 3  # We'll use a 3-column layout
-            
-            # Prepare data for the table
-            table_data =[]
-            num_skills = len(skills_list)
-            # Calculate number of rows needed (ceiling division)
-            rows = (num_skills + num_columns - 1) // num_columns
 
-            for i in range(rows):
-                row_items =[]
-                for j in range(num_columns):
-                    skill_index = i * num_columns + j # This fills row by row
-                    if skill_index < num_skills:
-                        skill_text = f"• {skills_list[skill_index]}" # Add a bullet point
-                        row_items.append(Paragraph(skill_text, style_normal))
-                    else:
-                        row_items.append(Paragraph("", style_normal)) # Empty cell for padding
-                table_data.append(row_items)
+            grouped_skills_mode = any(":" in skill for skill in skills_list)
+            if grouped_skills_mode:
+                for skill in skills_list:
+                    story.append(Paragraph(f"• {skill}", style_bullet))
+                story.append(Spacer(1, 0.1*inch))
+            else:
+                num_columns = 4 if len(skills_list) >= 24 else 3
 
-            if table_data:
-                # Calculate available width for the table
-                page_width_available = letter[0] - doc.leftMargin - doc.rightMargin
-                col_width = page_width_available / num_columns
-                
-                # Define column widths for the table
-                colWidths = [col_width] * num_columns
-                
-                skills_table = Table(table_data, colWidths=colWidths)
-                skills_table.setStyle(TableStyle([
-                    ('VALIGN', (0,0), (-1,-1), 'TOP'),          # Align content to the top of cells
-                    ('LEFTPADDING', (0,0), (0,-1), 10),         # No left padding for cells
-                    ('RIGHTPADDING', (0,0), (-1,-1), 6),        # Padding between columns (applied to right of each cell)
-                    ('BOTTOMPADDING', (0,0), (-1,-1), 3),       # Padding below each row
-                ]))
-                story.append(skills_table)
-                story.append(Spacer(1, 0.1*inch)) # Add some space after the skills section
+                table_data =[]
+                num_skills = len(skills_list)
+                rows = (num_skills + num_columns - 1) // num_columns
+
+                for i in range(rows):
+                    row_items =[]
+                    for j in range(num_columns):
+                        skill_index = i * num_columns + j
+                        if skill_index < num_skills:
+                            skill_text = f"• {skills_list[skill_index]}"
+                            row_items.append(Paragraph(skill_text, style_normal))
+                        else:
+                            row_items.append(Paragraph("", style_normal))
+                    table_data.append(row_items)
+
+                if table_data:
+                    page_width_available = letter[0] - doc.leftMargin - doc.rightMargin
+                    col_width = page_width_available / num_columns
+                    colWidths = [col_width] * num_columns
+
+                    skills_table = Table(table_data, colWidths=colWidths)
+                    skills_table.setStyle(TableStyle([
+                        ('VALIGN', (0,0), (-1,-1), 'TOP'),
+                        ('LEFTPADDING', (0,0), (0,-1), 10),
+                        ('RIGHTPADDING', (0,0), (-1,-1), 6),
+                        ('BOTTOMPADDING', (0,0), (-1,-1), 3),
+                    ]))
+                    story.append(skills_table)
+                    story.append(Spacer(1, 0.1*inch))
     
     # --- Experience ---
     if resume_data.experience:
@@ -271,62 +331,7 @@ def create_resume_pdf(resume_data: Resume, header_title: str | None = None) -> b
             story.append(Spacer(1, 0.1*inch))
             
             if exp.description and exp.description != "NA":
-                # First check if the description is already in bullets format by looking for newlines
-                if '\n' in exp.description:
-                    # Handle existing bullet points for responsibilities/achievements
-                    bullets = exp.description.split('\n')
-                    for bullet in bullets:
-                        if bullet.strip():  # Skip empty lines
-                            # Handle bullet formatting - ensure proper bullet point
-                            bullet_text = bullet.strip()
-                            if not bullet_text.startswith('-') and not bullet_text.startswith('•'):
-                                bullet_text = f"• {bullet_text}"
-                            elif bullet_text.startswith('-'):
-                                bullet_text = f"• {bullet_text[1:].strip()}"
-                            
-                            story.append(Paragraph(bullet_text, style_bullet))
-                else:
-                    # Split a paragraph into sentences and make each sentence a bullet point
-                    text = exp.description.strip()
-                    
-                    text = text.replace("e.g.", "TEMP_EG")
-                    text = text.replace("i.e.", "TEMP_IE")
-                    text = text.replace("etc.", "TEMP_ETC")
-                    text = text.replace("vs.", "TEMP_VS")
-                    text = text.replace("Mr.", "TEMP_MR")
-                    text = text.replace("Mrs.", "TEMP_MRS")
-                    text = text.replace("Ms.", "TEMP_MS")
-                    text = text.replace("Dr.", "TEMP_DR")
-                    text = text.replace("St.", "TEMP_ST")
-                    text = text.replace("Ph.D.", "TEMP_PHD")
-                    text = text.replace("U.S.", "TEMP_US")
-                    text = text.replace("U.K.", "TEMP_UK")
-                    
-                    # Split by periods
-                    sentences = text.split('. ')
-                    
-                    # Process each sentence
-                    for i, sentence in enumerate(sentences):
-                        if sentence:
-                            # Restore abbreviations
-                            sentence = sentence.replace("TEMP_EG", "e.g.")
-                            sentence = sentence.replace("TEMP_IE", "i.e.")
-                            sentence = sentence.replace("TEMP_ETC", "etc.")
-                            sentence = sentence.replace("TEMP_VS", "vs.")
-                            sentence = sentence.replace("TEMP_MR", "Mr.")
-                            sentence = sentence.replace("TEMP_MRS", "Mrs.")
-                            sentence = sentence.replace("TEMP_MS", "Ms.")
-                            sentence = sentence.replace("TEMP_DR", "Dr.")
-                            sentence = sentence.replace("TEMP_ST", "St.")
-                            sentence = sentence.replace("TEMP_PHD", "Ph.D.")
-                            sentence = sentence.replace("TEMP_US", "U.S.")
-                            sentence = sentence.replace("TEMP_UK", "U.K.")
-                            
-                            # Add period back if it's not the last sentence or if the last sentence doesn't end with punctuation
-                            if i < len(sentences) - 1 or not sentence[-1] in ['.', '!', '?']:
-                                sentence = sentence + '.'
-                                
-                            story.append(Paragraph(f"• {sentence.strip()}", style_bullet))
+                _append_bullet_lines(story, exp.description, style_bullet)
             
             story.append(Spacer(1, 0.15*inch))
     
@@ -373,74 +378,7 @@ def create_resume_pdf(resume_data: Resume, header_title: str | None = None) -> b
                 projects_section.append(Paragraph(f"<b>{proj.name}</b>", style_job_title))
             
             if proj.description and proj.description != "NA":
-                if '\n' in proj.description:
-                    bullets = proj.description.split('\n')
-                    for bullet in bullets:
-                        if bullet.strip():
-                            bullet_text = bullet.strip()
-                            if not bullet_text.startswith('-') and not bullet_text.startswith('•'):
-                                bullet_text = f"• {bullet_text}"
-                            elif bullet_text.startswith('-'):
-                                bullet_text = f"• {bullet_text[1:].strip()}"
-                            projects_section.append(Paragraph(bullet_text, style_bullet))
-                else:
-                    text = proj.description.strip()
-                    
-                    text = text.replace("e.g.", "TEMP_EG")
-                    text = text.replace("i.e.", "TEMP_IE")
-                    text = text.replace("etc.", "TEMP_ETC")
-                    text = text.replace("vs.", "TEMP_VS")
-                    text = text.replace("Mr.", "TEMP_MR")
-                    text = text.replace("Mrs.", "TEMP_MRS")
-                    text = text.replace("Ms.", "TEMP_MS")
-                    text = text.replace("Dr.", "TEMP_DR")
-                    text = text.replace("St.", "TEMP_ST")
-                    text = text.replace("Ph.D.", "TEMP_PHD")
-                    text = text.replace("U.S.", "TEMP_US")
-                    text = text.replace("U.K.", "TEMP_UK")
-                    
-                    sentences =[]
-                    current_sentence = ""
-                    for char in text:
-                        current_sentence += char
-                        if char == '.':
-                            if text.index(current_sentence) + len(current_sentence) == len(text) or \
-                               (text.index(current_sentence) + len(current_sentence) < len(text) and \
-                                text[text.index(current_sentence) + len(current_sentence)] == ' '):
-                                sentences.append(current_sentence.strip())
-                                current_sentence = ""
-                    if current_sentence.strip():
-                        sentences.append(current_sentence.strip())
-
-                    if not sentences or (len(sentences) == 1 and sentences[0] == text):
-                        sentences =[s.strip() for s in text.split('.') if s.strip()]
-                        for i in range(len(sentences)):
-                            if i < len(sentences) -1: 
-                                sentences[i] = sentences[i] + "."
-                            elif not sentences[i].endswith(('.', '!', '?')):
-                                 sentences[i] = sentences[i] + "."
-
-
-                    for i, sentence in enumerate(sentences):
-                        if sentence:
-                            # Restore abbreviations
-                            sentence = sentence.replace("TEMP_EG", "e.g.")
-                            sentence = sentence.replace("TEMP_IE", "i.e.")
-                            sentence = sentence.replace("TEMP_ETC", "etc.")
-                            sentence = sentence.replace("TEMP_VS", "vs.")
-                            sentence = sentence.replace("TEMP_MR", "Mr.")
-                            sentence = sentence.replace("TEMP_MRS", "Mrs.")
-                            sentence = sentence.replace("TEMP_MS", "Ms.")
-                            sentence = sentence.replace("TEMP_DR", "Dr.")
-                            sentence = sentence.replace("TEMP_ST", "St.")
-                            sentence = sentence.replace("TEMP_PHD", "Ph.D.")
-                            sentence = sentence.replace("TEMP_US", "U.S.")
-                            sentence = sentence.replace("TEMP_UK", "U.K.")
-                            
-                            if not sentence.endswith(('.', '!', '?')):
-                                sentence += '.'
-                                
-                            projects_section.append(Paragraph(f"• {sentence.strip()}", style_bullet))
+                _append_bullet_lines(projects_section, proj.description, style_bullet)
             
             if proj.technologies and proj.technologies != ["NA"]:
                 tech_list =[t for t in proj.technologies if t != "NA"]

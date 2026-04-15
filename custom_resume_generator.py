@@ -1,24 +1,26 @@
 import argparse
 import logging
-import io # Import io
 import supabase_utils
 import config # Assuming config holds necessary configurations like a default email
-from pydantic import BaseModel, Field, ValidationError # Import pydantic
-from typing import List, Optional, Dict, Any # Import typing helpers
+from pydantic import ValidationError # Import pydantic
+from typing import Dict, Any
 import json # Import json for parsing LLM output
 import pdf_generator 
 import re
 import asyncio 
+import math
 from llm_client import primary_client
 from models import (
-    Education, Experience, Project, Certification, Links, Resume,
-    SummaryOutput, SkillsOutput, ExperienceListOutput, SingleExperienceOutput,
-    ProjectListOutput, SingleProjectOutput, ValidationResponse
+    Resume, SummaryOutput, SkillsOutput, SingleExperienceOutput,
+    SingleProjectOutput,
+    ATSKeywordPlan, ATSResumeRewriteOutput
 )
 import time
 import os
 # --- Logging Setup ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+RESUME_GENERATION_TEMPERATURE = 0.6
 
 def _sanitize_filename_token(value: Any, default: str = "UNKNOWN") -> str:
     """
@@ -40,32 +42,423 @@ def _build_resume_filename(job_id: str, company: Any) -> str:
     job_token = _sanitize_filename_token(job_id, default="JOB")
     return f"VIKAS_POKALA_{company_token}_{job_token}.pdf"
 
-# --- LLM Personalization Function ---
-def extract_json_from_text(text: str) -> str:
-    """
-    Extracts and returns the first valid JSON string found in the text.
-    Strips markdown formatting (e.g., ```json ... ```), extra whitespace, etc.
-    """
 
-    # First, try to find JSON inside markdown code blocks
-    fenced_match = re.search(r"```(?:json)?\s*(\[\s*{.*?}\s*\]|\[.*?\]|\{.*?\})\s*```", text, re.DOTALL)
-    if fenced_match:
-        json_candidate = fenced_match.group(1).strip()
+def _serialize_resume_for_prompt(resume: Resume) -> str:
+    """
+    Convert the resume model to JSON for LLM prompt context.
+    """
+    return json.dumps(resume.model_dump(), indent=2)
+
+
+def _serialize_job_for_prompt(job_details: Dict[str, Any]) -> str:
+    """
+    Convert the selected job fields to JSON for LLM prompt context.
+    """
+    job_payload = {
+        "job_title": job_details.get("job_title", ""),
+        "company": job_details.get("company", ""),
+        "level": job_details.get("level", ""),
+        "description": job_details.get("description", ""),
+    }
+    return json.dumps(job_payload, indent=2)
+
+
+def _load_base_resume_details() -> Resume | None:
+    """
+    Load the base resume for generation.
+    Local resume.json is the primary source of truth so it can be edited manually.
+    Supabase is only used as a fallback when the local file is missing.
+    """
+    resume_path = getattr(config, "BASE_RESUME_PATH", "resume.json")
+    raw_resume_details = None
+
+    if os.path.exists(resume_path):
+        logging.info(f"Loading base resume from local source-of-truth file: {resume_path}")
+        try:
+            with open(resume_path, "r", encoding="utf-8") as f:
+                raw_resume_details = json.load(f)
+        except Exception as e:
+            logging.error(f"Failed to read or decode {resume_path}: {e}")
+            return None
     else:
-        # If no fenced block, try to find the first raw JSON object or array
-        loose_match = re.search(r"(\[\s*{.*?}\s*\]|\[.*?\]|\{.*?\})", text, re.DOTALL)
-        if loose_match:
-            json_candidate = loose_match.group(1).strip()
-        else:
-            # Fallback to the entire string if nothing found
-            json_candidate = text.strip()
+        logging.info(
+            f"Local base resume file '{resume_path}' not found. Falling back to Supabase base_resume."
+        )
+        raw_resume_details = supabase_utils.get_base_resume()
+        if raw_resume_details:
+            logging.info("Successfully loaded base resume from Supabase database.")
 
-    # Optional: validate it's parsable
+    if not raw_resume_details:
+        logging.error(
+            f"Base resume not found in local file '{resume_path}' or Supabase. "
+            "Create/update resume.json before generating resumes."
+        )
+        return None
+
     try:
-        parsed = json.loads(json_candidate)
-        return json.dumps(parsed, indent=2)  # return clean, pretty version
-    except json.JSONDecodeError as e:
-        raise ValueError(f"Failed to extract valid JSON: {e}\nRaw candidate:\n{json_candidate}")
+        for key in ["skills", "experience", "education", "projects", "certifications", "languages"]:
+            if raw_resume_details.get(key) is None:
+                raw_resume_details[key] = []
+        return Resume(**raw_resume_details)
+    except Exception as e:
+        logging.error(f"Error parsing base resume details into Pydantic model: {e}")
+        logging.error(f"Raw base resume data: {raw_resume_details}")
+        return None
+
+
+def _paragraphize_summary(text: str) -> str:
+    """
+    Convert multi-line summary text into one readable paragraph.
+    """
+    if not text:
+        return text
+    parts = [part.strip() for part in str(text).splitlines() if part.strip()]
+    return " ".join(parts) if parts else str(text).strip()
+
+
+def _limit_bullet_lines(text: str, max_lines: int) -> str:
+    """
+    Keep only the first N meaningful newline-separated lines.
+    """
+    if not text or "\n" not in text:
+        return text
+    parts = [part.strip() for part in str(text).splitlines() if part.strip()]
+    return "\n".join(parts[:max_lines]) if parts else str(text).strip()
+
+
+def _normalize_skills_output(base_skills: list[str], rewritten_skills: list[str]) -> list[str]:
+    """
+    Prefer grouped skill lines when the base resume already uses grouped categories.
+    Keep the model's selected skills when possible instead of snapping back to the full base list.
+    """
+    cleaned_base = [skill for skill in (base_skills or []) if str(skill).strip()]
+    cleaned_rewritten = [skill for skill in (rewritten_skills or []) if str(skill).strip()]
+
+    base_is_grouped = any(":" in str(skill) for skill in cleaned_base)
+    rewritten_is_grouped = any(":" in str(skill) for skill in cleaned_rewritten)
+
+    if base_is_grouped and not rewritten_is_grouped and cleaned_rewritten:
+        grouped_base_map: dict[str, list[tuple[str, str]]] = {}
+        ordered_group_names: list[str] = []
+
+        for skill_line in cleaned_base:
+            if ":" not in str(skill_line):
+                continue
+            group_name, raw_items = str(skill_line).split(":", 1)
+            group_name = group_name.strip()
+            if not group_name:
+                continue
+            ordered_group_names.append(group_name)
+            grouped_base_map[group_name] = []
+            for item in raw_items.split(","):
+                original_item = item.strip()
+                if original_item:
+                    grouped_base_map[group_name].append(
+                        (original_item.lower(), original_item)
+                    )
+
+        grouped_selected: dict[str, list[str]] = {group: [] for group in ordered_group_names}
+        uncategorized: list[str] = []
+        seen_items: set[str] = set()
+
+        for rewritten_skill in cleaned_rewritten:
+            rewritten_text = str(rewritten_skill).strip()
+            normalized_rewritten = rewritten_text.lower()
+            matched_group = None
+
+            for group_name in ordered_group_names:
+                group_items = grouped_base_map.get(group_name, [])
+                if any(
+                    normalized_rewritten == normalized_item
+                    or normalized_rewritten in normalized_item
+                    or normalized_item in normalized_rewritten
+                    for normalized_item, _ in group_items
+                ):
+                    matched_group = group_name
+                    break
+
+            if matched_group:
+                if rewritten_text.lower() not in seen_items:
+                    grouped_selected[matched_group].append(rewritten_text)
+                    seen_items.add(rewritten_text.lower())
+            else:
+                if rewritten_text.lower() not in seen_items:
+                    uncategorized.append(rewritten_text)
+                    seen_items.add(rewritten_text.lower())
+
+        regrouped_lines: list[str] = []
+        for group_name in ordered_group_names:
+            items = grouped_selected[group_name]
+            if items:
+                regrouped_lines.append(f"{group_name}: {', '.join(items)}")
+
+        if uncategorized:
+            regrouped_lines.append(f"Additional: {', '.join(uncategorized)}")
+
+        if regrouped_lines:
+            return regrouped_lines
+
+    return cleaned_rewritten or cleaned_base
+
+
+def _normalize_personalized_resume_output(
+    base_resume: Resume,
+    personalized_resume: Resume,
+) -> Resume:
+    """
+    Enforce the final output shape even if the model drifts from formatting instructions.
+    """
+    normalized_resume = personalized_resume.model_copy(deep=True)
+    normalized_resume.summary = _paragraphize_summary(normalized_resume.summary)
+    normalized_resume.skills = _normalize_skills_output(
+        base_resume.skills,
+        normalized_resume.skills,
+    )
+
+    for exp in normalized_resume.experience:
+        exp.description = _limit_bullet_lines(exp.description, max_lines=5)
+
+    for proj in normalized_resume.projects:
+        proj.description = _limit_bullet_lines(proj.description, max_lines=4)
+
+    return normalized_resume
+
+
+async def generate_keyword_plan_with_llm(
+    full_resume: Resume,
+    job_details: Dict[str, Any],
+) -> ATSKeywordPlan:
+    """
+    First step of the new AI flow: ask the LLM to return the important ATS keywords
+    and targeting plan using only the provided resume and job data.
+    """
+    prompt = f"""
+    Build a keyword strategy for tailoring this software engineering resume to the target job.
+
+    Target job:
+    {_serialize_job_for_prompt(job_details)}
+
+    Base resume:
+    {_serialize_resume_for_prompt(full_resume)}
+
+    Goal:
+    Create a practical ATS keyword plan that improves match quality while staying fully grounded in the resume.
+
+    What to do:
+    1. Identify the target role family and likely emphasis of the job (for example: backend, full stack, platform, API/integration-heavy, product engineering, cloud-focused).
+    2. Extract the most important job requirements and keywords.
+    3. For each important keyword or requirement, classify it as:
+       - supported: clearly supported by the resume
+       - adjacent: not directly stated, but reasonably supported by closely related evidence in the resume
+       - unsupported: requested by the job but not supported by the resume
+    4. Rank supported and adjacent keywords by importance for ATS and recruiter screening.
+    5. Build a section-level placement plan so the strongest supported keywords are distributed naturally across summary, skills, experience, and projects instead of being clustered in one place.
+    6. Identify lower-signal or less relevant resume content that should be de-emphasized for this job.
+    7. Create brief writing guidance for the rewriter so the final resume sounds like a strong real software engineering resume, not a keyword-stuffed rewrite.
+
+    Important constraints:
+    - Stay factually grounded in the base resume.
+    - Do not recommend claiming unsupported tools, domains, achievements, or responsibilities.
+    - Favor keywords that are both important to the job and defensible from the resume.
+    - Use software-engineering judgment, not generic resume advice.
+    - Keep the plan compact, useful, and production-friendly.
+    """
+
+    system_prompt = """
+    You are a senior resume-targeting strategist for software engineering resumes and a precise JSON generator.
+
+    Your task is to convert a target job description and a base resume into an evidence-based keyword strategy that will guide resume rewriting.
+
+    Rules:
+    - Return exactly one valid JSON object matching the required schema.
+    - Do not output markdown, commentary, or extra text.
+    - Use only information present in the provided job details and base resume.
+    - Treat the base resume as the source of truth for candidate facts.
+    - Treat the job details as the source of truth for target requirements.
+    - Do not invent skills, experience, achievements, tools, domains, or seniority.
+    - Optimize specifically for software engineering, backend, platform, and full-stack resume targeting.
+    - Prefer exact job-description wording only when it is truthfully supported by the resume.
+    - Reason privately and output only the final JSON.
+    """
+
+    llm_output = primary_client.generate_content(
+        prompt=prompt,
+        system_prompt=system_prompt,
+        temperature=RESUME_GENERATION_TEMPERATURE,
+        response_format=ATSKeywordPlan,
+    )
+    return ATSKeywordPlan.model_validate_json(llm_output)
+
+
+def _apply_two_step_rewrite_to_resume(
+    base_resume: Resume,
+    rewrite_output: ATSResumeRewriteOutput,
+) -> Resume:
+    """
+    Merge the second-step AI rewrite output into a copy of the base resume.
+    """
+    personalized_resume = base_resume.model_copy(deep=True)
+    personalized_resume.summary = rewrite_output.summary
+    personalized_resume.skills = rewrite_output.skills
+    personalized_resume.experience = rewrite_output.experience
+    personalized_resume.projects = rewrite_output.projects
+    return personalized_resume
+
+
+async def rewrite_resume_with_keyword_plan(
+    full_resume: Resume,
+    job_details: Dict[str, Any],
+    keyword_plan: ATSKeywordPlan,
+) -> ATSResumeRewriteOutput:
+    """
+    Second step of the new AI flow: rewrite the resume using the AI-produced keyword plan.
+    """
+    prompt = f"""
+    Rewrite the base resume for this target software engineering job using the keyword strategy.
+
+    Target job:
+    {_serialize_job_for_prompt(job_details)}
+
+    ATS keyword plan:
+    {json.dumps(keyword_plan.model_dump(), indent=2)}
+
+    Base resume:
+    {_serialize_resume_for_prompt(full_resume)}
+
+    Primary objective:
+    Produce a stronger, more relevant, ATS-friendly software engineering resume that stays fully truthful to the base resume.
+
+    Order of priority:
+    1. factual accuracy
+    2. role relevance
+    3. clarity and strength of writing
+    4. natural keyword coverage
+    5. concision
+
+    Rewrite instructions:
+
+    General
+    - Treat the base resume as the factual source of truth.
+    - Use the keyword plan to guide emphasis, phrasing, keyword placement, and trimming decisions.
+    - Substantially improve wording, relevance, and clarity where needed.
+    - Do not mirror the base resume mechanically.
+    - Do not fabricate companies, titles, dates, projects, technologies, scope, ownership, or achievements.
+    - Do not force unsupported keywords into the resume.
+    - If the job asks for something unsupported, emphasize the closest supported strengths instead.
+
+    Summary
+    - Write the professional summary as one concise paragraph.
+    - It should sound like a strong software engineering candidate, not a generic profile.
+    - Include role fit, core technical strengths, and business or engineering impact where supported.
+    - Keep it tight and readable.
+
+    Skills
+    - Present skills in meaningful grouped categories, not as one long flat list.
+    - Keep the skills section broad enough for ATS, but focused on the strongest supported technologies, platforms, and engineering practices for the role.
+    - Remove weak, redundant, or low-signal items when they dilute relevance.
+
+    Experience
+    - Keep the same number and order of experience items.
+    - Keep each item's job_title, company, location, start_date, and end_date unchanged.
+    - For each role, write 4-6 strong bullet-ready lines.
+    - Each bullet should aim to communicate some combination of action, scope, technical stack, and result.
+    - Prefer specific, meaningful bullets over generic responsibility statements.
+    - Use metrics only when explicitly supported by the base resume.
+    - De-emphasize weaker or less relevant details if stronger material exists.
+
+    Projects
+    - Keep the same number and order of project items.
+    - Keep each project's name and link unchanged.
+    - For each project, write 3-5 strong bullet-ready lines.
+    - Highlight the most relevant engineering work, architecture, implementation, integrations, and outcomes supported by the base resume.
+    - You may refine each project's technologies list by removing weaker or less relevant supported items.
+
+    Keyword behavior
+    - Distribute the strongest supported keywords naturally across summary, skills, experience, and projects.
+    - Prefer natural repetition over obvious repetition.
+    - Use exact job-description wording selectively when truthful and useful.
+    - Avoid keyword stuffing, awkward phrasing, and buzzword clustering.
+
+    Output scope
+    - Return only the sections requested by the schema: summary, skills, experience, and projects.
+    """
+
+    system_prompt = """
+    You are a senior software-engineering resume writer and a precise JSON generator.
+
+    Your task is to rewrite a base resume for a target software engineering job using an evidence-based keyword plan.
+
+    Rules:
+    - Return exactly one valid JSON object matching the required schema.
+    - Do not output markdown, commentary, or extra text.
+    - Base resume facts are the source of truth.
+    - The keyword plan controls emphasis, not facts.
+    - Never invent or imply experience that is not supported by the base resume.
+    - Optimize for both ATS match and human credibility.
+    - Write like an experienced real resume writer: concise, specific, relevant, and natural.
+    - Avoid robotic wording, buzzword stacking, and generic filler.
+    - Reason privately and output only the final JSON.
+    """
+
+    llm_output = primary_client.generate_content(
+        prompt=prompt,
+        system_prompt=system_prompt,
+        temperature=RESUME_GENERATION_TEMPERATURE,
+        response_format=ATSResumeRewriteOutput,
+    )
+    return ATSResumeRewriteOutput.model_validate_json(llm_output)
+
+
+async def personalize_resume_with_two_step_ai(
+    base_resume_details: Resume,
+    job_details: Dict[str, Any],
+) -> Resume:
+    """
+    Two-step AI-only resume generation flow:
+    1. Generate keyword plan from job + resume.
+    2. Rewrite the resume using that plan.
+    """
+    job_id = job_details.get("job_id")
+    logging.info(f"Generating keyword plan for job_id: {job_id}")
+    keyword_plan = await generate_keyword_plan_with_llm(
+        full_resume=base_resume_details,
+        job_details=job_details,
+    )
+
+    logging.info(f"Rewriting resume with AI keyword plan for job_id: {job_id}")
+    rewritten_resume = await rewrite_resume_with_keyword_plan(
+        full_resume=base_resume_details,
+        job_details=job_details,
+        keyword_plan=keyword_plan,
+    )
+
+    personalized_resume_data = _apply_two_step_rewrite_to_resume(
+        base_resume=base_resume_details,
+        rewrite_output=rewritten_resume,
+    )
+    personalized_resume_data = _normalize_personalized_resume_output(
+        base_resume=base_resume_details,
+        personalized_resume=personalized_resume_data,
+    )
+
+    for section_name in ("experience", "projects"):
+        original_content = getattr(base_resume_details, section_name)
+        customized_content = getattr(personalized_resume_data, section_name)
+        is_valid, reason = validate_customization(
+            section_name,
+            original_content,
+            customized_content,
+            allow_project_technology_changes=(section_name == "projects"),
+        )
+        if not is_valid:
+            raise ValueError(
+                f"Two-step AI validation failed for {section_name}: {reason}"
+            )
+        logging.info(
+            f"Two-step AI validation passed for section {section_name}. Reason: {reason}"
+        )
+
+    return personalized_resume_data
 
 
 async def personalize_section_with_llm(
@@ -154,9 +547,12 @@ async def personalize_section_with_llm(
         ---
         **Instructions:**
         - Rewrite **only** the summary to be concise, impactful, and highly relevant to the Target Job.
+        - Return the summary as one concise paragraph, not bullet points.
+        - The paragraph should communicate profile, core stack, technical strengths, business/product impact, and role fit.
         - **CRITICAL: The core professional identity and experience level (e.g., "IT Support and Cybersecurity Specialist with 4+ years") from the "Original Content of This Section" MUST be preserved.** Do NOT change the candidate's stated primary role or invent a new one like "Frontend Engineer" if it wasn't their original title. The goal is to make their *existing* role and experience sound relevant, not to misrepresent their primary job function.
         - Highlight 2-3 key qualifications or experiences from the "Full Resume Context" or "Original Content of This Section" that ALIGN with the "Job Description." These highlighted aspects should be FACTUALLY based on the provided resume materials.
         - Use strong action verbs and keywords from the "Job Description" where appropriate, but ONLY when describing actual experiences or skills present in the resume.
+        - You do not have to mirror the original wording. Improve phrasing aggressively while staying factually grounded.
         - **ABSOLUTELY DO NOT INVENT new information, skills, projects, job titles, or responsibilities not explicitly found in the original resume materials.** Rephrasing and emphasizing existing facts is allowed; fabrication is not.
         - For example, if the original summary says "IT Support Specialist who developed a tool using React," do NOT change this to "Experienced Frontend Engineer." Instead, you might say "IT Support Specialist with experience developing user-facing tools using React, such as Click4IT..."
         ---
@@ -177,10 +573,13 @@ async def personalize_section_with_llm(
             - Enhance the 'description' field ONLY. All other fields (job_title, company, dates, etc.) MUST remain UNCHANGED within this specific experience item.
             - Integrate relevant skills from the "Full Resume Context" (especially any explicit skills list) and keywords from the "Target Job Description" naturally into the description.
             - Show HOW these skills were applied and what the IMPACT or achievement was. Quantify achievements if possible, based on the original content.
+            - Return the description as about 5 concise bullet-ready lines separated by newline characters.
+            - Prefer the strongest and most relevant bullets rather than preserving every lower-value detail from the original wording.
+            - You may combine or reshape original points into stronger bullets as long as the result stays truthful to the resume evidence.
             - Example: Instead of "Used Python for scripting," try "Automated data processing tasks using Python scripts, reducing manual effort by 20%."
             - Do NOT invent skills or experiences. Stick to the candidate's actual background as reflected in the provided materials.
             ---
-            **Expected JSON Output Structure:** {{"experience": {{"job_title": "Original Job Title", "company": "Original Company", "dates": "Original Dates", "description": "Enhanced description...", "location": "Original Location (if present)"}}}}
+            **Expected JSON Output Structure:** {{"experience": {{"job_title": "Original Job Title", "company": "Original Company", "start_date": "Original Start Date", "end_date": "Original End Date", "description": "Enhanced description...", "location": "Original Location (if present)"}}}}
             """ 
             prompt = prompt_intro + specific_instructions
             prompts.append(prompt)
@@ -196,6 +595,9 @@ async def personalize_section_with_llm(
             - Enhance the 'description' field ONLY. All other fields (name, technologies, link, etc.) MUST remain UNCHANGED within this specific project item.
             - Integrate relevant skills from the "Full Resume Context" and keywords from the "Target Job Description" naturally into the description.
             - Show HOW these skills were applied.
+            - Aim for about 4 concise bullet-ready lines separated by newline characters, but you may use 3-5 if that creates a stronger project entry.
+            - Prefer the most impressive and most job-relevant outcomes instead of trying to preserve every lower-value detail.
+            - You may combine or reshape original points into stronger bullets as long as the result stays truthful to the resume evidence.
             - Example: Instead of "Project using React," try "Developed a responsive UI for [Project Purpose] using React and Redux, improving user engagement."
             - Do NOT invent skills or experiences.
             ---
@@ -220,11 +622,14 @@ async def personalize_section_with_llm(
 
         **2. Select and Refine for the Target Job and Conciseness:**
         - From your temporary list of the candidate's *actual, explicitly mentioned* skills, select only those that are most relevant to the 'Target Job Description'.
-        - Your final output MUST be a CONCISE list. **This list MUST contain between 5 and 15 skills.**
-        - If, after strictly following all rules, you identify fewer than 5 relevant skills that meet all criteria, then list only those. Do not add skills just to meet the 5-skill minimum if they are not genuinely present and relevant.
+        - Return the skills section as grouped category lines like "Languages: ...", "Backend: ...", or "Cloud / DevOps: ...", not as a long flat list of individual skills.
+        - If the original skills section is written in grouped categories like "Languages: ..." or "Cloud / DevOps: ...", preserve that style unless a cleaner grouped structure is clearly better.
+        - Keep the list broad and ATS-friendly. Preserve a strong range of relevant supported skills instead of shrinking it to a tiny shortlist.
+        - When the resume supports it, prefer roughly 6 to 12 grouped lines or roughly 15 to 30 individual skills. If fewer are truly supported and relevant, list only those.
         - Prioritize skills that are directly mentioned in the 'Target Job Description' AND are confirmed to be in the candidate's actual, explicitly written skills.
+        - Remove or de-emphasize lower-value items when they dilute focus. Examples can include vague AI terms like "AI summarization" or generic phrases like "production support" when more specific skills are available.
         - Avoid redundancy. If a skill is a more general version of another already included (e.g., "Cloud Computing" vs. "AWS"), prefer the more specific one if relevant and explicitly mentioned, or the one that best matches the job description.
-        - This skills list is for high-level impact and scannability. Do not list every minor tool or skill if it clutters the main message or dilutes the impact of key skills.
+        - This skills list should still be readable, but do not throw away meaningful skills just to force a short list.
 
         ---
         **Expected JSON Output Structure:** {{"skills": ["Python", "JavaScript", "React", "Node.js", "AWS (EC2, S3, Lambda)", "Docker", "Kubernetes", "Agile Methodologies", "CI/CD Pipelines", "SQL", "Git"]}}
@@ -247,7 +652,7 @@ async def personalize_section_with_llm(
             llm_output = primary_client.generate_content(
                 prompt=prompt,
                 system_prompt=system_prompt,
-                temperature=0.2,
+                temperature=RESUME_GENERATION_TEMPERATURE,
                 response_format=OutputModel,
             )
             
@@ -294,7 +699,8 @@ async def personalize_section_with_llm(
 def validate_customization(
     section_name: str, 
     original_content: Any, 
-    customized_content: Any
+    customized_content: Any,
+    allow_project_technology_changes: bool = False,
 ) -> tuple[bool, str]:
     """
     Programmatically validates that the customized content hasn't altered
@@ -316,7 +722,7 @@ def validate_customization(
             c_dict = cust.model_dump() if hasattr(cust, 'model_dump') else cust
 
             # Check core fields haven't changed
-            for field in ['job_title', 'company', 'dates', 'location']:
+            for field in ['job_title', 'company', 'location', 'start_date', 'end_date']:
                 o_val = str(o_dict.get(field, '')).strip()
                 c_val = str(c_dict.get(field, '')).strip()
                 # Use case-insensitive comparison to avoid false positives on minor formatting
@@ -341,11 +747,11 @@ def validate_customization(
                 if o_val.lower() != c_val.lower():
                     return False, f"Core project field '{field}' was changed from '{o_val}' to '{c_val}'."
 
-            # Check technologies list
-            o_tech = o_dict.get('technologies', [])
-            c_tech = c_dict.get('technologies', [])
-            if sorted([str(t).lower().strip() for t in o_tech]) != sorted([str(t).lower().strip() for t in c_tech]):
-                 return False, f"Technologies list was changed from '{o_tech}' to '{c_tech}'."
+            if not allow_project_technology_changes:
+                o_tech = o_dict.get('technologies', [])
+                c_tech = c_dict.get('technologies', [])
+                if sorted([str(t).lower().strip() for t in o_tech]) != sorted([str(t).lower().strip() for t in c_tech]):
+                     return False, f"Technologies list was changed from '{o_tech}' to '{c_tech}'."
 
         return True, "Projects validation passed."
         
@@ -358,6 +764,7 @@ def validate_customization(
 async def process_job(
     job_details: Dict[str, Any],
     base_resume_details: Resume,
+    generation_flow: str = "legacy",
 ):
     """
     Processes a single job: personalizes resume, generates PDF, uploads, updates status.
@@ -371,52 +778,58 @@ async def process_job(
 
     try:
         # 1. Personalize Resume Sections
-        personalized_resume_data = base_resume_details.model_copy(deep=True)
-        any_validation_failed = False
-        sections_to_personalize = {
-            "summary": base_resume_details.summary,
-            "experience": base_resume_details.experience,
-            "projects": base_resume_details.projects,
-            "skills": base_resume_details.skills,
-        }
+        if generation_flow == "two_step_ai":
+            logging.info(
+                f"Using two-step AI resume generation flow for job_id: {job_id}"
+            )
+            personalized_resume_data = await personalize_resume_with_two_step_ai(
+                base_resume_details=base_resume_details,
+                job_details=job_details,
+            )
+        else:
+            logging.info(
+                f"Using legacy section-by-section resume generation flow for job_id: {job_id}"
+            )
+            personalized_resume_data = base_resume_details.model_copy(deep=True)
+            sections_to_personalize = {
+                "summary": base_resume_details.summary,
+                "experience": base_resume_details.experience,
+                "projects": base_resume_details.projects,
+                "skills": base_resume_details.skills,
+            }
 
-        sleep_time = config.LLM_REQUEST_DELAY_SECONDS
+            sleep_time = config.LLM_REQUEST_DELAY_SECONDS
 
-        for section_name, section_content in sections_to_personalize.items():
-            if any_validation_failed:
-                logging.warning(f"Skipping further personalization for job_id {job_id} due to prior validation failure.")
-                break
+            for section_name, section_content in sections_to_personalize.items():
+                if section_content and section_content != "NA":
+                    logging.info(f"Waiting for {sleep_time} seconds before next request...")
+                    time.sleep(sleep_time)
 
-            if section_content and section_content != "NA":
-                logging.info(f"Waiting for {sleep_time} seconds before next request...")
-                time.sleep(sleep_time)
+                    logging.info(f"Personalizing section: {section_name} for job_id: {job_id}")
+                    personalized_content = await personalize_section_with_llm(
+                        section_name,
+                        section_content,
+                        base_resume_details,
+                        job_details
+                    )
 
-                logging.info(f"Personalizing section: {section_name} for job_id: {job_id}")
-                personalized_content = await personalize_section_with_llm(
-                    section_name,
-                    section_content,
-                    base_resume_details,
-                    job_details
-                )
+                    logging.info(f"Validating customization for section: {section_name} for job_id: {job_id}")
+                    is_valid, reason = validate_customization(
+                        section_name,
+                        section_content,
+                        personalized_content
+                    )
 
-                logging.info(f"Validating customization for section: {section_name} for job_id: {job_id}")
-                is_valid, reason = validate_customization(
-                    section_name,
-                    section_content,
-                    personalized_content
-                )
+                    if is_valid:
+                        logging.info(f"Customization for section {section_name} is valid. Reason: {reason}")
+                        setattr(personalized_resume_data, section_name, personalized_content)
+                    else:
+                        logging.warning(f"VALIDATION FAILED for section {section_name} for job_id {job_id}. Reason: {reason}")
+                        logging.warning(f"Falling back to original {section_name} content for job_id {job_id}.")
 
-                if is_valid:
-                    logging.info(f"Customization for section {section_name} is valid. Reason: {reason}")
-                    setattr(personalized_resume_data, section_name, personalized_content)
-                    sections_to_personalize[section_name] = personalized_content
+                    logging.info(f"Finished processing section: {section_name} for job_id: {job_id}")
                 else:
-                    logging.warning(f"VALIDATION FAILED for section {section_name} for job_id {job_id}. Reason: {reason}")
-                    logging.warning(f"Falling back to original {section_name} content for job_id {job_id}.")
-
-                logging.info(f"Finished processing section: {section_name} for job_id: {job_id}")
-            else:
-                logging.info(f"Skipping empty section: {section_name} for job_id: {job_id}")
+                    logging.info(f"Skipping empty section: {section_name} for job_id: {job_id}")
 
         # 2. Generate PDF
         logging.info(f"Generating PDF for job_id: {job_id}")
@@ -473,48 +886,29 @@ async def run_job_processing_cycle(
     limit_override: int | None = None,
     target_job_id: str | None = None,
     force_regenerate: bool = False,
+    generation_flow: str | None = None,
 ):
     """
     Fetches top jobs and processes them one by one.
     """
     logging.info("Starting new job processing cycle...")
+    selected_generation_flow = generation_flow or getattr(
+        config,
+        "RESUME_GENERATION_FLOW",
+        "legacy",
+    )
+    if selected_generation_flow not in {"legacy", "two_step_ai"}:
+        raise SystemExit(
+            f"Unsupported resume generation flow: {selected_generation_flow}. "
+            "Use 'legacy' or 'two_step_ai'."
+        )
+    logging.info(f"Selected resume generation flow: {selected_generation_flow}")
 
-    # 1. Retrieve Base Resume Details from Supabase (with local file fallback)
-    resume_path = getattr(config, 'BASE_RESUME_PATH', 'resume.json')
-    
-    # Try fetching resume from Supabase first
-    raw_resume_details = supabase_utils.get_base_resume()
-    
-    if raw_resume_details:
-        logging.info("Successfully loaded base resume from Supabase database.")
-    elif os.path.exists(resume_path):
-        logging.info(f"Supabase fetch failed. Falling back to local file: {resume_path}")
-        try:
-            with open(resume_path, 'r', encoding='utf-8') as f:
-                raw_resume_details = json.load(f)
-        except Exception as e:
-            logging.error(f"Failed to read or decode {resume_path}: {e}")
-            return
-    else:
-        logging.error(f"Base resume not found in Supabase or at '{resume_path}'. Please run the 'Parse Resume' workflow first.")
+    # 1. Retrieve Base Resume Details from local source of truth (with Supabase fallback)
+    base_resume_details = _load_base_resume_details()
+    if not base_resume_details:
+        logging.error("Could not load valid base resume details. Aborting cycle.")
         return
-
-    if not raw_resume_details:
-        logging.error(f"Could not load valid base resume details. Aborting cycle.")
-        return
-
-    # Parse raw details into Pydantic model
-    try:
-        # Ensure lists are handled correctly if they are null/None from DB
-        for key in ['skills', 'experience', 'education', 'projects', 'certifications', 'languages']:
-             if raw_resume_details.get(key) is None:
-                 raw_resume_details[key] = []
-        base_resume_details = Resume(**raw_resume_details)
-        logging.info("Successfully parsed base resume.")
-    except Exception as e:
-        logging.error(f"Error parsing base resume details into Pydantic model: {e}")
-        logging.error(f"Raw base resume data: {raw_resume_details}")
-        return # Abort cycle if base resume is invalid
 
     # 2. Fetch Top Jobs to Process
     jobs_limit = limit_override if limit_override is not None else config.JOBS_TO_CUSTOMIZE_PER_RUN
@@ -547,7 +941,7 @@ async def run_job_processing_cycle(
                 "A new customized resume will be created and linked to this job."
             )
 
-        await process_job(job_record, base_resume_details)
+        await process_job(job_record, base_resume_details, selected_generation_flow)
         logging.info("Finished job processing cycle.")
         return
 
@@ -607,7 +1001,7 @@ async def run_job_processing_cycle(
 
     # 3. Process each job sequentially to avoid overwhelming LLM/resources
     for job_details in jobs_to_process:
-        await process_job(job_details, base_resume_details)
+        await process_job(job_details, base_resume_details, selected_generation_flow)
 
     logging.info("Finished job processing cycle.")
 
@@ -627,6 +1021,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="With --job-id, create a new resume even if that job already has one linked.",
     )
+    parser.add_argument(
+        "--flow",
+        choices=["legacy", "two_step_ai"],
+        help="Choose which resume generation flow to run. Defaults to config.RESUME_GENERATION_FLOW.",
+    )
     return parser
 
 
@@ -642,6 +1041,7 @@ if __name__ == "__main__":
                 limit_override=args.limit,
                 target_job_id=args.job_id,
                 force_regenerate=args.force_regenerate,
+                generation_flow=args.flow,
             )
         )
         logging.info("Rresume processing completed successfully.")

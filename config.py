@@ -28,6 +28,7 @@ LLM_API_KEY = os.environ.get("LLM_API_KEY") or os.environ.get("GEMINI_API_KEY") 
 # Use any model supported by LiteLLM (gemini, openai/gpt-4o-mini, groq/llama-3.3-70b-versatile)
 # Full list of supported models & naming: https://docs.litellm.ai/docs/providers
 LLM_MODEL = "openai/gpt-5.4"
+RESUME_GENERATION_FLOW = "legacy"  # Options: "legacy", "two_step_ai"
 
 # --- Search Configuration ---
 LINKEDIN_SEARCH_QUERIES = [

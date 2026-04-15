@@ -5,6 +5,19 @@ This file is the fastest way to run the project without searching across code.
 ## 1. Change Numbers In One Place
 Edit: `config.py`
 
+## 0. Base Resume Source Of Truth
+
+Edit: `resume.json`
+
+- `resume.json` is now the primary source of truth for resume generation
+- You can manually maintain your summary, skills, experience bullets, project bullets, education, and links there
+- Resume generation reads local `resume.json` first and only falls back to Supabase if the file is missing
+- You do not need to re-run the resume parser when you are updating your resume manually
+- For best output:
+  - keep `skills` as a full list of real skills
+  - keep `experience.description` as newline-separated bullet text
+  - keep `projects.description` as newline-separated bullet text
+
 Main numeric controls:
 
 - `LINKEDIN_MAX_NEW_JOBS_PER_RUN` = max shortlisted jobs saved to Supabase after scraping/filtering
@@ -48,7 +61,25 @@ python score_jobs.py
 python custom_resume_generator.py
 ```
 
-`python custom_resume_generator.py` now uses the legacy resume-generation flow only.
+`python custom_resume_generator.py` uses the flow selected in `config.py` and reads `resume.json` as the primary base resume source.
+
+Current flow switch:
+
+```python
+RESUME_GENERATION_FLOW = "legacy"      # or "two_step_ai"
+```
+
+If you want to run the legacy flow explicitly for just this run:
+
+```bash
+python custom_resume_generator.py --flow legacy
+```
+
+If you want to run the new two-step AI flow explicitly for just this run:
+
+```bash
+python custom_resume_generator.py --flow two_step_ai
+```
 
 If you want to choose how many top jobs to customize for just this run:
 
@@ -66,10 +97,22 @@ If you want to generate for one exact job:
 python custom_resume_generator.py --job-id 4399298072
 ```
 
+If you want to generate for one exact job using the new two-step AI flow:
+
+```bash
+python custom_resume_generator.py --job-id 4399298072 --flow two_step_ai
+```
+
 If that job already has a resume and you want to regenerate it with the current legacy flow:
 
 ```bash
 python custom_resume_generator.py --job-id 4399298072 --force-regenerate
+```
+
+If that job already has a resume and you want to regenerate it with the new two-step AI flow:
+
+```bash
+python custom_resume_generator.py --job-id 4399298072 --flow two_step_ai --force-regenerate
 ```
 
 If you want to run the full cycle but override only the customize count:
@@ -77,6 +120,23 @@ If you want to run the full cycle but override only the customize count:
 ```bash
 python daily_ops.py run-cycle --customize-limit 10
 python daily_ops.py run-cycle --customize-limit 20
+```
+
+## 2.1 Resume Editing Workflow
+
+When you want to update your base resume:
+
+1. Edit `resume.json`
+2. Run a single-job test:
+
+```bash
+python custom_resume_generator.py --job-id 4399298072 --flow two_step_ai
+```
+
+3. If needed, regenerate:
+
+```bash
+python custom_resume_generator.py --job-id 4399298072 --flow two_step_ai --force-regenerate
 ```
 
 ## 3. Mark Jobs As Applied
