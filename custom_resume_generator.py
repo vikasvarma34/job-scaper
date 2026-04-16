@@ -35,6 +35,52 @@ def _log_keyword_plan_response(job_id: Any, llm_output: str) -> None:
         pass
     logging.info("ATS keyword plan response for job_id %s:\n%s", job_id, pretty_output)
 
+
+def _postprocess_keyword_plan(plan: ATSKeywordPlan) -> ATSKeywordPlan:
+    """
+    Light cleanup for first-pass keyword extraction so the second rewrite call
+    sees resume-usable skill keywords instead of low-signal admin phrases.
+    """
+    hard_blocklist = (
+        "microsoft office",
+        "pc skills",
+        "office suite",
+        "computer literacy",
+        "software demo content",
+    )
+    soft_blocklist = (
+        "status updates",
+        "issue escalation",
+        "vendor team coordination",
+        "leadership support",
+        "fluency in english",
+        "knowledge transfer",
+    )
+
+    def _clean(items: list[str], *, blocklist: tuple[str, ...], max_items: int) -> list[str]:
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for raw_item in items:
+            item = re.sub(r"\s+", " ", str(raw_item or "")).strip(" ,.-")
+            if not item:
+                continue
+            normalized = item.lower()
+            if normalized in seen:
+                continue
+            if any(blocked in normalized for blocked in blocklist):
+                continue
+            seen.add(normalized)
+            cleaned.append(item)
+            if len(cleaned) >= max_items:
+                break
+        return cleaned
+
+    return ATSKeywordPlan(
+        hard_skills=_clean(list(plan.hard_skills), blocklist=hard_blocklist, max_items=16),
+        soft_skills=_clean(list(plan.soft_skills), blocklist=soft_blocklist, max_items=10),
+    )
+
+
 def _sanitize_filename_token(value: Any, default: str = "UNKNOWN") -> str:
     """
     Convert arbitrary text into a safe uppercase filename token.
@@ -236,17 +282,22 @@ async def generate_keyword_plan_with_llm(
     {_serialize_job_for_prompt(job_details)}
 
     Return only two arrays:
-    - hard_skills: technical skills, tools, technologies, frameworks, platforms, databases, APIs, testing keywords, and engineering-method keywords from the job description
-    - soft_skills: communication, collaboration, ownership, problem-solving, teamwork, adaptability, and similar people/process skills from the job description
+    - hard_skills: named technical skills, tools, technologies, frameworks, platforms, databases, APIs, testing keywords, cloud/devops/security items, and concise named engineering methods from the job description
+    - soft_skills: concise interpersonal, collaboration, ownership, communication, problem-solving, teamwork, leadership, or execution traits from the job description
 
     Rules:
     - Use only the job description.
     - Do not compare against the resume.
     - Do not explain anything.
     - Do not add extra fields.
-    - Keep the lists concise, useful, and ATS-friendly.
+    - Keep the lists concise, useful, ATS-friendly, and suitable for a software-engineering resume rewrite.
     - Prefer exact or near-exact job wording where helpful.
     - Remove obvious duplicates.
+    - Hard skills must be resume-usable technical keywords, not broad responsibility phrases or generic capability statements.
+    - Soft skills must be short, resume-usable people/work-style traits, not administrative process phrases.
+    - Exclude office-productivity tools, generic computer-literacy items, language-fluency requirements, status-reporting phrases, escalation phrases, and other low-signal administrative wording unless they are clearly central to the engineering role.
+    - Prefer concrete named technologies and concise named practices over long descriptive phrases.
+    - Prefer roughly 8 to 16 hard_skills and 4 to 10 soft_skills.
     """
 
     system_prompt = """
@@ -271,7 +322,7 @@ async def generate_keyword_plan_with_llm(
         response_format=ATSKeywordPlan,
     )
     _log_keyword_plan_response(job_id=job_details.get("job_id"), llm_output=llm_output)
-    return ATSKeywordPlan.model_validate_json(llm_output)
+    return _postprocess_keyword_plan(ATSKeywordPlan.model_validate_json(llm_output))
 
 
 def _apply_two_step_rewrite_to_resume(
@@ -330,10 +381,10 @@ async def rewrite_resume_with_keyword_plan(
 
     General
     - Treat the base resume as the source of truth for concrete employment history, project history, dates, titles, companies, and measurable outcomes already written there.
-    - Treat the first-pass hard_skills and soft_skills as user-verified skills that are allowed to be used in the rewrite, even if some of them are not explicitly written in the current base resume wording.
+    - CRITICAL INSTRUCTION: The first-pass hard_skills and soft_skills are user-verified skills. The candidate has actually performed these skills in real work. You are explicitly authorized and encouraged to incorporate them naturally into the resume even if they are not explicitly written or mentioned anywhere in the current base resume wording. These are not made-up skills — the user has confirmed the candidate possesses them.
     - Use the first-pass hard_skills and soft_skills as active keyword guidance while rewriting.
     - Do not ignore high-value hard_skills from the first pass. Use them where they improve ATS match and role relevance.
-    - Do not ignore soft_skills from the first pass. Reflect them naturally in summary and bullet wording.
+    - Do not ignore soft_skills from the first pass, but use them only through natural phrasing in the summary and bullet wording, not as standalone skills.
     - Substantially improve wording, relevance, and clarity where needed.
     - Do not mirror the base resume mechanically.
     - Do not fabricate companies, titles, dates, projects, technologies, scope, ownership, or achievements.
@@ -345,7 +396,7 @@ async def rewrite_resume_with_keyword_plan(
     - Create a clean header_title for the resume subtitle based on the target job title.
     - The header_title should be human-readable and professional.
     - Remove noisy job-board text such as salaries, locations, "Hiring", IDs, company/internal prefixes, or awkward separators when they do not belong in a resume title.
-    - Preserve meaningful stack or specialization signals such as Java, React, Backend, Full-Stack, or Software Engineer when they are part of the real role title.
+    - Preserve meaningful stack or specialization signals when they are part of the real role title.
     - If the original target title already looks clean and professional, keep it close to the original meaning.
 
     Summary
@@ -353,19 +404,25 @@ async def rewrite_resume_with_keyword_plan(
     - It should sound like a strong software engineering candidate, not a generic profile.
     - Include role fit, core technical strengths, and business or engineering impact when evidenced by the base resume.
     - Use several of the highest-value hard_skills in the summary when that improves ATS match and readability.
-    - Use soft_skills in a natural way, such as collaboration, problem-solving, communication, ownership, or cross-functional delivery.
+    - Reflect relevant soft_skills naturally through the phrasing and emphasis of the summary when useful.
     - You may mention user-verified first-pass skills in the summary even when they are not explicitly stated in the current base resume wording.
     - Keep it tight and readable.
 
     Skills
     - Present skills in meaningful grouped categories, not as one long flat list.
-    - The skills section must contain technical skills only: languages, frameworks, libraries, platforms, databases, APIs, testing tools, cloud/devops tools, and engineering methodologies/patterns.
+    - The skills section must contain technical skills only: languages, frameworks, libraries, platforms, databases, APIs, security/auth technologies, testing tools, cloud/devops tools, and named engineering methodologies or patterns.
     - Do not place soft skills in the skills section. Do not add categories like "Soft Skills", "Interpersonal Skills", or similar.
-    - Use soft_skills in the professional summary and in experience/project wording instead, by showing collaboration, ownership, communication, problem-solving, or cross-functional work through natural sentences.
+    - Use soft_skills in the professional summary and in experience/project wording instead, through natural sentences rather than standalone entries.
+    - The skills section must not contain narrative phrases, responsibility phrases, business-impact phrases, or broad capability labels.
+    - Prefer concise named items over descriptive phrases.
+    - Engineering practices are allowed only when they are concise and named.
+    - Do not turn whole resume themes into skills. If something reads like a responsibility, strength, working style, or narrative phrase instead of a named tool, technology, platform, or concise practice, keep it out of the skills section.
     - Treat the skills section as the primary place to cover first-pass hard_skills.
-    - Keep the skills section broad enough for ATS, but focused on the strongest relevant technologies, platforms, and engineering practices for the target job.
-    - Prefer to include important first-pass hard_skills in the skills section even if the current base wording under-emphasizes them, because those first-pass skills are user-verified.
+    - Keep the skills section broad enough for ATS, but focused on the strongest relevant technologies, platforms, and named engineering practices for the target job.
+    - Prefer to include important first-pass hard_skills in the skills section even if the current base wording under-emphasizes or does not mention them at all, because those first-pass skills are user-verified.
     - Remove weak, redundant, or low-signal items when they dilute relevance.
+    - Avoid repeating the same concept across multiple categories unless there is a very strong reason.
+    - Keep each grouped line concise and scannable rather than cramming too many loosely related items into one category.
 
     Experience
     - Keep the same number and order of experience items.
@@ -376,7 +433,7 @@ async def rewrite_resume_with_keyword_plan(
     - Use metrics only when evidenced by the base resume.
     - De-emphasize weaker or less relevant details if stronger material exists.
     - Use hard_skills from the first pass when they fit naturally with the role and improve ATS match.
-    - Use soft_skills from the first pass by showing communication, collaboration, ownership, problem-solving, debugging, or cross-functional execution through the bullet wording.
+    - Use soft_skills from the first pass by reflecting them naturally through the bullet wording rather than listing them explicitly.
     - Do not invent fake experience claims. If a first-pass skill is user-verified but not clearly tied to a specific job bullet in the base resume, prefer to surface it in the summary or skills section instead of attaching it to a fabricated work claim.
 
     Projects
@@ -386,11 +443,12 @@ async def rewrite_resume_with_keyword_plan(
     - Highlight the most relevant engineering work, architecture, implementation, integrations, and outcomes evidenced by the base resume.
     - You may refine each project's technologies list by removing weaker or less relevant items already present in the base resume.
     - Use hard_skills from the first pass when they fit naturally with the project and improve ATS match.
-    - Use soft_skills from the first pass through phrasing about collaboration, execution, ownership, debugging, communication, or delivery.
+    - Use soft_skills from the first pass through natural phrasing in the project bullets rather than explicit soft-skill labels.
     - Do not invent fake project claims. If a first-pass skill is user-verified but not clearly tied to a specific project in the base resume, prefer to use it in the summary or skills section instead of fabricating project details.
 
     Keyword behavior
-    - Distribute the hard_skills and soft_skills naturally across summary, skills, experience, and projects.
+    - Distribute hard_skills across summary, skills, experience, and projects where they fit naturally.
+    - Use soft_skills only in the summary, experience, and projects. Never place soft_skills in the skills section.
     - Prefer natural repetition over obvious repetition.
     - Use job-description wording selectively when useful.
     - It is acceptable to add first-pass hard_skills to the summary or skills section to improve ATS coverage, even when they are not strongly emphasized in the current base wording, because those skills are user-verified.
@@ -411,6 +469,8 @@ async def rewrite_resume_with_keyword_plan(
     - Do not output markdown, commentary, or extra text.
     - Base resume facts are the source of truth for concrete jobs, projects, dates, companies, and measurable claims.
     - The keyword plan contains user-verified hard_skills and soft_skills that are allowed to be used in the rewrite, even if the current base resume wording does not mention every one of them explicitly.
+    - Soft skills must never appear as standalone entries inside the skills section; they should appear only through natural wording in the summary or bullets.
+    - The skills section should contain concise named technologies, tools, platforms, databases, APIs, security items, testing tools, and named engineering practices only.
     - The header_title must be a cleaned, professional version of the target job title suitable for a resume subtitle.
     - Never invent fake experience or project claims that are not evidenced by the base resume.
     - Optimize for both ATS match and human credibility.
