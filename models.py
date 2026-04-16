@@ -81,5 +81,9 @@ class ATSResumeRewriteOutput(BaseModel):
     experience: List[Experience] = Field(default_factory=list)
     projects: List[Project] = Field(default_factory=list)
 
+
+class CoverLetterOutput(BaseModel):
+    cover_letter: str
+
 class Config:
     extra = 'allow'

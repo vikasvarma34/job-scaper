@@ -86,6 +86,13 @@
             </div>
             <p class="helper-text">Generate With ID automatically regenerates if that job already has one.</p>
           </div>
+          <div class="job-runner">
+            <label class="field-label" for="email-override-input">Optional Email Override For Generation</label>
+            <div class="job-runner-row">
+              <input id="email-override-input" class="job-input" type="email" placeholder="Leave empty to use default email from resume.json">
+            </div>
+            <p class="helper-text">If you enter an email here, web-triggered resume and cover-letter generation will use it for this run. Leave it empty to use the default email.</p>
+          </div>
         </article>
       </section>
 
@@ -170,6 +177,15 @@
                       {% if job.resume_download_url %}
                         <a href="{{ job.resume_download_url }}">Download Resume</a>
                       {% endif %}
+                      {% if job.has_resume %}
+                        <a class="mini-button secondary" href="{{ url_for('edit_documents', job_id=job.job_id) }}" target="_blank" rel="noreferrer">Edit Docs</a>
+                      {% endif %}
+                      {% if job.has_resume %}
+                        <button class="mini-button dark" data-run-job-action="generate_cover_letter" data-job-id="{{ job.job_id }}">Generate Cover Letter</button>
+                      {% endif %}
+                      {% if job.cover_letter_download_url %}
+                        <a href="{{ job.cover_letter_download_url }}">Download Cover Letter</a>
+                      {% endif %}
                       {% if job.status != "applied" %}
                         <button class="mini-button" data-mark-applied="true" data-job-id="{{ job.job_id }}">Mark Applied</button>
                       {% else %}
@@ -201,6 +217,7 @@
       const taskTiming = document.getElementById("task-timing");
       const jobIdInput = document.getElementById("job-id-input");
       const resumeCountInput = document.getElementById("resume-count-input");
+      const emailOverrideInput = document.getElementById("email-override-input");
       const refreshButton = document.getElementById("refresh-button");
       const jobsBody = document.getElementById("jobs-body");
       const jobsError = document.getElementById("jobs-error");
@@ -217,7 +234,8 @@
         generate_next: "generate the next highest-scored resume",
         generate_selected: "generate the selected number of highest-scored resumes",
         cleanup: "run cleanup",
-        generate_job: "generate a resume for this job ID"
+        generate_job: "generate a resume for this job ID",
+        generate_cover_letter: "generate a cover letter for this job ID"
       };
 
       let allJobs = {{ data.jobs | tojson }};
@@ -318,6 +336,15 @@
           if (job.resume_download_url) {
             links.push(`<a href="${escapeHtml(job.resume_download_url)}">Download Resume</a>`);
           }
+          if (job.has_resume && job.job_id) {
+            links.push(`<a class="mini-button secondary" href="/edit/${encodeURIComponent(job.job_id)}" target="_blank" rel="noreferrer">Edit Docs</a>`);
+          }
+          if (job.has_resume && job.job_id) {
+            links.push(`<button class="mini-button dark" data-run-job-action="generate_cover_letter" data-job-id="${escapeHtml(job.job_id)}">Generate Cover Letter</button>`);
+          }
+          if (job.cover_letter_download_url) {
+            links.push(`<a href="${escapeHtml(job.cover_letter_download_url)}">Download Cover Letter</a>`);
+          }
           if (String(job.status || "").toLowerCase() !== "applied" && job.job_id) {
             links.push(`<button class="mini-button" data-mark-applied="true" data-job-id="${escapeHtml(job.job_id)}">Mark Applied</button>`);
           } else if (String(job.status || "").toLowerCase() === "applied") {
@@ -344,6 +371,7 @@
         }).join("");
         bindAppliedButtons();
         bindCopyJdButtons();
+        bindJobActionButtons();
       }
 
       function bindAppliedButtons() {
@@ -355,6 +383,20 @@
       function bindCopyJdButtons() {
         document.querySelectorAll("[data-copy-jd='true']").forEach((button) => {
           button.addEventListener("click", () => copyJobDescription(button));
+        });
+      }
+
+      function bindJobActionButtons() {
+        document.querySelectorAll("[data-run-job-action]").forEach((button) => {
+          button.addEventListener("click", () => {
+            const action = button.dataset.runJobAction || "";
+            const jobId = button.dataset.jobId || "";
+            if (!action || !jobId) {
+              return;
+            }
+            jobIdInput.value = jobId;
+            runAction(action);
+          });
         });
       }
 
@@ -444,6 +486,7 @@
 
       async function runAction(action) {
         const jobId = jobIdInput.value.trim();
+        const emailOverride = emailOverrideInput.value.trim();
         let count = "";
 
         if (action === "generate_job" && !jobId) {
@@ -480,6 +523,9 @@
         formData.append("action", action);
         if (jobId) {
           formData.append("job_id", jobId);
+        }
+        if (emailOverride) {
+          formData.append("email_override", emailOverride);
         }
         if (count) {
           formData.append("count", count);

@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Edit Documents - {{ job.job_id }}</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+  </head>
+  <body>
+    <main class="page-shell">
+      <section class="hero-panel">
+        <div>
+          <p class="eyebrow">Manual Editor</p>
+          <h1>{{ job.job_title or "Job Documents" }}</h1>
+          <p class="hero-copy">
+            Edit the existing customized resume and cover letter for job {{ job.job_id }} without using the LLM again.
+          </p>
+          <p class="hero-copy">
+            {{ job.company or "Unknown Company" }}
+          </p>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <div>
+            <p class="eyebrow">Documents</p>
+            <h2>Edit Existing Files</h2>
+          </div>
+          <div class="table-links">
+            <a href="{{ url_for('index') }}" target="_blank" rel="noreferrer">Open Dashboard</a>
+            <a href="{{ resume_download_url }}">Download Resume</a>
+            {% if cover_letter_download_url %}
+              <a href="{{ cover_letter_download_url }}">Download Cover Letter</a>
+            {% endif %}
+          </div>
+        </div>
+
+        {% if save_success %}
+          <p class="panel-copy" style="color: var(--success); font-weight: 700;">Manual edits saved successfully.</p>
+        {% endif %}
+        {% if save_error %}
+          <p class="panel-copy" style="color: var(--danger); font-weight: 700;">{{ save_error }}</p>
+        {% endif %}
+
+        <form method="post">
+          <div class="job-runner">
+            <label class="field-label" for="header-title">Resume Header Title</label>
+            <input id="header-title" name="header_title" class="job-input" type="text" value="{{ header_title }}">
+            <p class="helper-text">This is the subtitle shown under your name on the resume PDF.</p>
+          </div>
+
+          <div class="job-runner">
+            <label class="field-label" for="resume-json">Customized Resume JSON</label>
+            <textarea id="resume-json" name="resume_json" class="job-input" rows="28" style="min-height: 680px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;">{{ resume_json }}</textarea>
+            <p class="helper-text">Edit the existing customized resume fields directly. This page regenerates the resume PDF from this edited JSON and saves it back to storage and the database.</p>
+          </div>
+
+          <div class="job-runner">
+            <label class="field-label" for="cover-letter-text">Cover Letter Text</label>
+            <textarea id="cover-letter-text" name="cover_letter_text" class="job-input" rows="18" style="min-height: 420px;">{{ cover_letter_text }}</textarea>
+            <p class="helper-text">Edit the current cover letter text here. If this field has content, the cover letter PDF will also be regenerated and saved.</p>
+          </div>
+
+          <div class="actions-grid" style="grid-template-columns: repeat(2, minmax(0, 220px)); margin-top: 16px;">
+            <button type="submit" class="action-button primary">Save Manual Edits</button>
+            <a class="action-button" href="{{ url_for('edit_documents', job_id=job.job_id) }}" style="text-decoration: none; text-align: center;">Reload</a>
+          </div>
+        </form>
+      </section>
+    </main>
+  </body>
+</html>

@@ -165,6 +165,25 @@ def _load_base_resume_details() -> Resume | None:
         return None
 
 
+def _apply_job_contact_overrides(
+    resume: Resume,
+    job_details: Dict[str, Any],
+    email_override: str | None = None,
+) -> Resume:
+    """
+    Apply per-job contact overrides without changing the source-of-truth resume.json.
+    """
+    updated_resume = resume.model_copy(deep=True)
+    manual_email_override = str(email_override or "").strip()
+    if manual_email_override:
+        updated_resume.email = manual_email_override
+        return updated_resume
+    contact_email_override = str(job_details.get("contact_email_override") or "").strip()
+    if contact_email_override:
+        updated_resume.email = contact_email_override
+    return updated_resume
+
+
 def _paragraphize_summary(text: str) -> str:
     """
     Convert multi-line summary text into one readable paragraph.
@@ -847,6 +866,7 @@ async def process_job(
     job_details: Dict[str, Any],
     base_resume_details: Resume,
     generation_flow: str = "legacy",
+    email_override: str | None = None,
 ):
     """
     Processes a single job: personalizes resume, generates PDF, uploads, updates status.
@@ -918,6 +938,11 @@ async def process_job(
             base_resume=base_resume_details,
             personalized_resume=personalized_resume_data,
         )
+        personalized_resume_data = _apply_job_contact_overrides(
+            personalized_resume_data,
+            job_details,
+            email_override=email_override,
+        )
 
         # 2. Generate PDF
         logging.info(f"Generating PDF for job_id: {job_id}")
@@ -968,7 +993,11 @@ async def process_job(
 
         # 4. Add Customized Resume to Supabase
         logging.info("Adding customized resume to Supabase")
-        customized_resume_id = supabase_utils.save_customized_resume(personalized_resume_data, resume_path)
+        customized_resume_id = supabase_utils.save_customized_resume(
+            personalized_resume_data,
+            resume_path,
+            header_title=header_title,
+        )
 
 
         # 4. Update Job Record in Supabase
@@ -992,6 +1021,7 @@ async def run_job_processing_cycle(
     target_job_id: str | None = None,
     force_regenerate: bool = False,
     generation_flow: str | None = None,
+    email_override: str | None = None,
 ):
     """
     Fetches top jobs and processes them one by one.
@@ -1046,7 +1076,7 @@ async def run_job_processing_cycle(
                 "A new customized resume will be created and linked to this job."
             )
 
-        await process_job(job_record, base_resume_details, selected_generation_flow)
+        await process_job(job_record, base_resume_details, selected_generation_flow, email_override=email_override)
         logging.info("Finished job processing cycle.")
         return
 
@@ -1106,7 +1136,7 @@ async def run_job_processing_cycle(
 
     # 3. Process each job sequentially to avoid overwhelming LLM/resources
     for job_details in jobs_to_process:
-        await process_job(job_details, base_resume_details, selected_generation_flow)
+        await process_job(job_details, base_resume_details, selected_generation_flow, email_override=email_override)
 
     logging.info("Finished job processing cycle.")
 
@@ -1131,6 +1161,10 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["legacy", "two_step_ai"],
         help="Choose which resume generation flow to run. Defaults to config.RESUME_GENERATION_FLOW.",
     )
+    parser.add_argument(
+        "--email-override",
+        help="Optional email override for this generation run. If omitted, the default resume email is used.",
+    )
     return parser
 
 
@@ -1147,6 +1181,7 @@ if __name__ == "__main__":
                 target_job_id=args.job_id,
                 force_regenerate=args.force_regenerate,
                 generation_flow=args.flow,
+                email_override=args.email_override,
             )
         )
         logging.info("Rresume processing completed successfully.")

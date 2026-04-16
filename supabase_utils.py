@@ -353,7 +353,8 @@ def get_job_by_id(job_id: str) -> dict | None:
         response = supabase.table(config.SUPABASE_TABLE_NAME)\
                            .select(
                                "job_id, company, job_title, level, description, "
-                               "resume_score, customized_resume_id, status, job_state, is_active"
+                               "resume_score, customized_resume_id, status, job_state, is_active, "
+                               "contact_email_override"
                            )\
                            .eq("job_id", job_id) \
                            .limit(1)\
@@ -369,6 +370,42 @@ def get_job_by_id(job_id: str) -> dict | None:
     except Exception as e:
         logging.error(f"Error fetching job data from Supabase for job_id {job_id}: {e}")
         return None
+
+
+def update_job_contact_email_override(job_id: str, email_override: str | None) -> bool:
+    """
+    Sets or clears a per-job contact email override.
+    Empty/None clears the override and falls back to the default resume email.
+    """
+    cleaned_job_id = str(job_id or "").strip()
+    if not cleaned_job_id:
+        logging.error("job_id is required for contact email override update.")
+        return False
+
+    cleaned_email = str(email_override or "").strip() or None
+
+    try:
+        response = (
+            supabase.table(config.SUPABASE_TABLE_NAME)
+            .update({"contact_email_override": cleaned_email})
+            .eq("job_id", cleaned_job_id)
+            .execute()
+        )
+        if response.data:
+            logging.info(
+                "Updated contact email override for job_id %s to %s",
+                cleaned_job_id,
+                cleaned_email or "<default>",
+            )
+            return True
+        logging.warning(
+            "Contact email override update ran for job_id %s but no rows were affected.",
+            cleaned_job_id,
+        )
+        return False
+    except Exception as e:
+        logging.error(f"Error updating contact email override for job_id {cleaned_job_id}: {e}")
+        return False
 
 def upload_customized_resume_to_storage(file_content: bytes, destination_path: str) -> Optional[str]:
     """
@@ -414,6 +451,31 @@ def upload_customized_resume_to_storage(file_content: bytes, destination_path: s
         #     supabase.storage.from_(config.SUPABASE_STORAGE_BUCKET).remove([destination_path])
         # except:
         #     logging.warning(f"Could not clean up potentially failed upload at {destination_path}")
+        return None
+
+
+def upload_cover_letter_to_storage(file_content: bytes, destination_path: str) -> Optional[str]:
+    """
+    Uploads the generated cover letter PDF (as bytes) to Supabase Storage.
+    """
+    if not file_content:
+        logging.error("Cannot upload empty cover letter content.")
+        return None
+    if not config.SUPABASE_STORAGE_BUCKET:
+        logging.error("Supabase storage bucket name not configured.")
+        return None
+
+    try:
+        logging.info(f"Uploading cover letter to Supabase Storage at path: {destination_path}")
+        supabase.storage.from_(config.SUPABASE_STORAGE_BUCKET).upload(
+            path=destination_path,
+            file=file_content,
+            file_options={"content-type": "application/pdf", "upsert": "true"},
+        )
+        logging.info(f"Successfully uploaded cover letter to path: {destination_path}")
+        return destination_path
+    except Exception as e:
+        logging.error(f"Error uploading cover letter to Supabase Storage: {e}")
         return None
 
 def update_job_with_resume_link(job_id: str, customized_resume_id: str,  new_status: Optional[str] = "resume_generated") -> bool:
@@ -490,7 +552,11 @@ def mark_jobs_as_applied(job_ids: list[str]) -> tuple[int, int]:
         logging.error(f"Error marking jobs as applied: {e}")
         return 0, len(cleaned_ids)
 
-def save_customized_resume(resume_data: 'Resume', resume_path: str) -> Optional[Any]: # Return type changed
+def save_customized_resume(
+    resume_data: 'Resume',
+    resume_path: str,
+    header_title: str | None = None,
+) -> Optional[Any]: # Return type changed
     """
     Saves a customized resume to the Supabase 'customized_resumes' table.
 
@@ -523,6 +589,7 @@ def save_customized_resume(resume_data: 'Resume', resume_path: str) -> Optional[
             data_to_insert = resume_data.dict(exclude_none=True)
 
         data_to_insert['resume_link'] = resume_path
+        data_to_insert['header_title'] = str(header_title or "").strip() or None
 
         logging.info(
             f"Saving customized resume for email: {getattr(resume_data, 'email', 'N/A')} "
@@ -595,6 +662,113 @@ def get_customized_resume(resume_id: str) -> Optional[Dict[str, Any]]:
         return None
     except Exception as e:
         logging.error(f"Error fetching customized resume {resume_id}: {e}")
+        return None
+
+
+def update_customized_resume(
+    resume_id: str,
+    resume_data: 'Resume',
+    resume_path: str,
+    header_title: str | None = None,
+) -> bool:
+    """
+    Updates an existing customized resume row with manually edited resume data.
+    """
+    if not resume_id or not resume_data:
+        logging.error("resume_id and resume_data are required to update customized resume.")
+        return False
+
+    try:
+        if hasattr(resume_data, 'model_dump'):
+            update_payload = resume_data.model_dump(exclude_none=True)
+        else:
+            update_payload = resume_data.dict(exclude_none=True)
+        update_payload["resume_link"] = resume_path
+        update_payload["header_title"] = str(header_title or "").strip() or None
+
+        response = (
+            supabase.table(config.SUPABASE_CUSTOMIZED_RESUMES_TABLE_NAME)
+            .update(update_payload)
+            .eq("id", resume_id)
+            .execute()
+        )
+        if response.data:
+            logging.info(f"Successfully updated customized resume {resume_id}.")
+            return True
+        logging.warning(f"Customized resume update for {resume_id} returned no affected rows.")
+        return False
+    except Exception as e:
+        logging.error(f"Error updating customized resume {resume_id}: {e}", exc_info=True)
+        return False
+
+
+def save_customized_cover_letter(
+    *,
+    job_id: str,
+    customized_resume_id: str,
+    company: str,
+    job_title: str,
+    cover_letter_text: str,
+    cover_letter_path: str,
+    llm_model: str,
+) -> Optional[Any]:
+    """
+    Inserts or updates a cover letter record keyed by job_id.
+    """
+    table_name = getattr(config, "SUPABASE_CUSTOMIZED_COVER_LETTERS_TABLE_NAME", "")
+    if not table_name:
+        logging.error("SUPABASE_CUSTOMIZED_COVER_LETTERS_TABLE_NAME is not configured.")
+        return None
+    if not job_id or not customized_resume_id or not cover_letter_text:
+        logging.error("job_id, customized_resume_id, and cover_letter_text are required.")
+        return None
+
+    payload = {
+        "job_id": str(job_id).strip(),
+        "customized_resume_id": str(customized_resume_id).strip(),
+        "company": str(company or "").strip(),
+        "job_title": str(job_title or "").strip(),
+        "cover_letter_text": str(cover_letter_text or "").strip(),
+        "cover_letter_link": str(cover_letter_path or "").strip(),
+        "llm_model": str(llm_model or "").strip(),
+    }
+
+    try:
+        response = (
+            supabase.table(table_name)
+            .upsert(payload, on_conflict="job_id")
+            .execute()
+        )
+        if response.data and len(response.data) > 0:
+            return response.data[0].get("id")
+        logging.warning(f"Cover letter upsert returned no data for job_id {job_id}. Response: {response}")
+        return None
+    except Exception as e:
+        logging.error(f"Error saving cover letter for job_id {job_id}: {e}", exc_info=True)
+        return None
+
+
+def get_cover_letter_by_job_id(job_id: str) -> Optional[Dict[str, Any]]:
+    """
+    Fetches a saved cover letter by job_id.
+    """
+    table_name = getattr(config, "SUPABASE_CUSTOMIZED_COVER_LETTERS_TABLE_NAME", "")
+    if not table_name or not job_id:
+        return None
+
+    try:
+        response = (
+            supabase.table(table_name)
+            .select("*")
+            .eq("job_id", str(job_id).strip())
+            .limit(1)
+            .execute()
+        )
+        if response.data:
+            return response.data[0]
+        return None
+    except Exception as e:
+        logging.error(f"Error fetching cover letter for job_id {job_id}: {e}")
         return None
 
 

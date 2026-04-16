@@ -1,5 +1,7 @@
 import io
+import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -9,9 +11,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from flask import Flask, abort, jsonify, redirect, render_template, request, send_file, url_for
+from pydantic import ValidationError
 
 import config
+import pdf_generator
 import supabase_utils
+from cover_letter_pdf import create_cover_letter_pdf
+from models import Resume
 
 
 ROOT_DIR = Path(__file__).resolve().parent
@@ -114,8 +120,19 @@ def _run_command_in_background(label: str, command: list[str]) -> None:
     threading.Thread(target=_worker, daemon=True).start()
 
 
-def _build_command(action: str, job_id: str | None, count: int | None) -> tuple[str, list[str]]:
+def _build_command(
+    action: str,
+    job_id: str | None,
+    count: int | None,
+    email_override: str | None = None,
+) -> tuple[str, list[str]]:
     python = sys.executable
+    cleaned_email_override = str(email_override or "").strip()
+
+    def _append_email_override(command: list[str]) -> list[str]:
+        if cleaned_email_override:
+            command.extend(["--email-override", cleaned_email_override])
+        return command
 
     if action == "scrape":
         return "Scrape Jobs", [python, "scraper.py"]
@@ -124,14 +141,14 @@ def _build_command(action: str, job_id: str | None, count: int | None) -> tuple[
     if action == "generate_next":
         return (
             "Generate Next Resume",
-            [python, "custom_resume_generator.py", "--flow", "two_step_ai", "--limit", "1"],
+            _append_email_override([python, "custom_resume_generator.py", "--flow", "two_step_ai", "--limit", "1"]),
         )
     if action == "generate_selected":
         if count is None or count <= 0:
             raise ValueError("Resume count must be a positive number.")
         return (
             f"Generate {count} Selected Resume{'s' if count != 1 else ''}",
-            [python, "custom_resume_generator.py", "--flow", "two_step_ai", "--limit", str(count)],
+            _append_email_override([python, "custom_resume_generator.py", "--flow", "two_step_ai", "--limit", str(count)]),
         )
     if action == "cleanup":
         return "Cleanup", [python, "daily_ops.py", "cleanup"]
@@ -143,7 +160,7 @@ def _build_command(action: str, job_id: str | None, count: int | None) -> tuple[
             raise ValueError(f"Could not find job_id {job_id}.")
 
         existing_resume_id = str(job_record.get("customized_resume_id") or "").strip()
-        command = [python, "custom_resume_generator.py", "--job-id", job_id, "--flow", "two_step_ai"]
+        command = _append_email_override([python, "custom_resume_generator.py", "--job-id", job_id, "--flow", "two_step_ai"])
         label = f"Generate Resume for {job_id}"
         if existing_resume_id:
             command.append("--force-regenerate")
@@ -151,6 +168,23 @@ def _build_command(action: str, job_id: str | None, count: int | None) -> tuple[
         return (
             label,
             command,
+        )
+    if action == "generate_cover_letter":
+        if not job_id:
+            raise ValueError("Job ID is required.")
+        job_record = supabase_utils.get_job_by_id(job_id)
+        if not job_record:
+            raise ValueError(f"Could not find job_id {job_id}.")
+        existing_resume_id = str(job_record.get("customized_resume_id") or "").strip()
+        if not existing_resume_id:
+            raise ValueError("Generate a customized resume first before creating a cover letter.")
+        existing_cover_letter = supabase_utils.get_cover_letter_by_job_id(job_id)
+        label = f"Generate Cover Letter for {job_id}"
+        if existing_cover_letter:
+            label = f"Regenerate Cover Letter for {job_id}"
+        return (
+            label,
+            _append_email_override([python, "cover_letter_generator.py", "--job-id", job_id]),
         )
 
     raise ValueError("Unknown action.")
@@ -188,6 +222,39 @@ def _build_linkedin_url(provider: str | None, job_id: str | None) -> str:
     return ""
 
 
+def _fetch_cover_letter_links_by_job_id(job_ids: list[str]) -> dict[str, dict]:
+    cleaned_ids = [str(job_id).strip() for job_id in job_ids if str(job_id).strip()]
+    if not cleaned_ids:
+        return {}
+
+    table_name = getattr(config, "SUPABASE_CUSTOMIZED_COVER_LETTERS_TABLE_NAME", "")
+    if not table_name:
+        return {}
+
+    try:
+        results: dict[str, dict] = {}
+        chunk_size = 100
+        for start in range(0, len(cleaned_ids), chunk_size):
+            chunk = cleaned_ids[start : start + chunk_size]
+            response = (
+                supabase_utils.supabase.table(table_name)
+                .select("job_id, id, cover_letter_link")
+                .in_("job_id", chunk)
+                .execute()
+            )
+            rows = response.data or []
+            for row in rows:
+                job_id = str(row.get("job_id") or "").strip()
+                if job_id:
+                    results[job_id] = {
+                        "id": str(row.get("id") or "").strip(),
+                        "link": str(row.get("cover_letter_link") or "").strip(),
+                    }
+        return results
+    except Exception as exc:
+        return {"__error__": {"message": f"Failed to load cover letter links: {exc}"}}
+
+
 def _job_score_value(job: dict) -> int:
     score = job.get("resume_score")
     try:
@@ -207,6 +274,29 @@ def _sort_jobs_for_dashboard(jobs: list[dict]) -> list[dict]:
     )
 
 
+def _looks_like_email(value: str) -> bool:
+    return bool(re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", str(value or "").strip()))
+
+
+def _sanitize_filename_token(value: object, default: str = "UNKNOWN") -> str:
+    text = str(value or "").strip()
+    if not text:
+        return default
+    text = re.sub(r"[^A-Za-z0-9]+", "_", text)
+    text = re.sub(r"_+", "_", text).strip("_")
+    return (text or default).upper()
+
+
+def _build_cover_letter_storage_path(job_id: str, company: object) -> str:
+    company_token = _sanitize_filename_token(company, default="COMPANY")
+    job_token = _sanitize_filename_token(job_id, default="JOB")
+    return f"cover_letters/VIKAS_POKALA_{company_token}_{job_token}_COVER_LETTER.pdf"
+
+
+def _resume_to_pretty_json(resume: Resume) -> str:
+    return json.dumps(resume.model_dump(), indent=2, ensure_ascii=False)
+
+
 def _fetch_all_jobs(batch_size: int = 500) -> tuple[list[dict], str | None]:
     try:
         all_jobs: list[dict] = []
@@ -217,7 +307,7 @@ def _fetch_all_jobs(batch_size: int = 500) -> tuple[list[dict], str | None]:
                 supabase_utils.supabase.table(config.SUPABASE_TABLE_NAME)
                 .select(
                     "job_id, company, job_title, description, location, provider, status, application_date, "
-                    "resume_score, scraped_at, customized_resume_id"
+                    "resume_score, scraped_at, customized_resume_id, contact_email_override"
                 )
                 .order("scraped_at", desc=True)
                 .range(offset, offset + batch_size - 1)
@@ -241,6 +331,7 @@ def _fetch_dashboard_data() -> dict:
     jobs = _sort_jobs_for_dashboard(jobs)
     resume_ids = [str(job.get("customized_resume_id") or "").strip() for job in jobs]
     resume_links = _fetch_resume_links_by_id(resume_ids)
+    cover_letter_map = _fetch_cover_letter_links_by_job_id([str(job.get("job_id") or "").strip() for job in jobs])
     if "__error__" in resume_links:
         return {
             "jobs": [],
@@ -252,12 +343,30 @@ def _fetch_dashboard_data() -> dict:
                 "pending_jobs": 0,
             },
         }
+    if "__error__" in cover_letter_map:
+        return {
+            "jobs": [],
+            "jobs_error": cover_letter_map["__error__"]["message"],
+            "stats": {
+                "total_jobs": 0,
+                "scored_jobs": 0,
+                "resumes_generated": 0,
+                "pending_jobs": 0,
+            },
+        }
 
     for job in jobs:
         resume_id = str(job.get("customized_resume_id") or "").strip()
+        cover_letter_record = cover_letter_map.get(str(job.get("job_id") or "").strip(), {})
         job["job_url"] = _build_linkedin_url(job.get("provider"), job.get("job_id"))
         job["resume_download_url"] = f"/resume/{resume_id}/download" if resume_id else ""
         job["has_resume"] = bool(resume_id)
+        job["cover_letter_download_url"] = (
+            f"/cover-letter/{job.get('job_id')}/download"
+            if cover_letter_record.get("link")
+            else ""
+        )
+        job["has_cover_letter"] = bool(cover_letter_record.get("link"))
         job["job_id"] = str(job.get("job_id") or "").strip()
 
     stats = {
@@ -302,6 +411,41 @@ def mark_job_applied(job_id: str):
     return jsonify({"ok": True, "updated": updated, "requested": requested, "job_id": cleaned_job_id})
 
 
+@app.post("/jobs/<job_id>/contact-email")
+def update_job_contact_email(job_id: str):
+    cleaned_job_id = str(job_id or "").strip()
+    if not cleaned_job_id:
+        return jsonify({"ok": False, "error": "Job ID is required."}), 400
+
+    raw_email = (
+        request.form.get("email")
+        if request.form
+        else None
+    )
+    if raw_email is None and request.is_json:
+        raw_email = (request.get_json(silent=True) or {}).get("email")
+    cleaned_email = str(raw_email or "").strip()
+
+    if cleaned_email and not _looks_like_email(cleaned_email):
+        return jsonify({"ok": False, "error": "Enter a valid email address."}), 400
+
+    success = supabase_utils.update_job_contact_email_override(
+        cleaned_job_id,
+        cleaned_email or None,
+    )
+    if not success:
+        return jsonify({"ok": False, "error": f"Could not update contact email for {cleaned_job_id}."}), 400
+
+    return jsonify(
+        {
+            "ok": True,
+            "job_id": cleaned_job_id,
+            "contact_email_override": cleaned_email,
+            "cleared": not bool(cleaned_email),
+        }
+    )
+
+
 @app.get("/resume/<resume_id>/download")
 def download_resume(resume_id: str):
     resume_path_map = _fetch_resume_links_by_id([resume_id])
@@ -329,6 +473,162 @@ def download_resume(resume_id: str):
     )
 
 
+@app.get("/cover-letter/<job_id>/download")
+def download_cover_letter(job_id: str):
+    record = supabase_utils.get_cover_letter_by_job_id(job_id)
+    if not record:
+        abort(404)
+
+    cover_letter_path = str(record.get("cover_letter_link") or "").strip()
+    if not cover_letter_path:
+        abort(404)
+
+    if cover_letter_path.startswith("http://") or cover_letter_path.startswith("https://"):
+        return redirect(cover_letter_path)
+
+    try:
+        file_bytes = supabase_utils.supabase.storage.from_(config.SUPABASE_STORAGE_BUCKET).download(cover_letter_path)
+    except Exception as exc:
+        abort(500, f"Failed to download cover letter: {exc}")
+
+    file_name = Path(cover_letter_path).name or f"{job_id}_cover_letter.pdf"
+    return send_file(
+        io.BytesIO(file_bytes),
+        mimetype="application/pdf",
+        as_attachment=True,
+        download_name=file_name,
+    )
+
+
+@app.route("/edit/<job_id>", methods=["GET", "POST"])
+def edit_documents(job_id: str):
+    cleaned_job_id = str(job_id or "").strip()
+    if not cleaned_job_id:
+        abort(404)
+
+    job_record = supabase_utils.get_job_by_id(cleaned_job_id)
+    if not job_record:
+        abort(404)
+
+    customized_resume_id = str(job_record.get("customized_resume_id") or "").strip()
+    if not customized_resume_id:
+        abort(400, "This job does not have a generated resume yet.")
+
+    customized_resume_record = supabase_utils.get_customized_resume(customized_resume_id)
+    if not customized_resume_record:
+        abort(404)
+
+    cover_letter_record = supabase_utils.get_cover_letter_by_job_id(cleaned_job_id) or {}
+    stored_header_title = str(customized_resume_record.get("header_title") or "").strip()
+    header_title = stored_header_title or str(job_record.get("job_title") or "").strip()
+
+    try:
+        current_resume = Resume.model_validate(customized_resume_record)
+    except Exception as exc:
+        abort(500, f"Failed to parse customized resume: {exc}")
+
+    save_error = ""
+    save_success = request.args.get("saved") == "1"
+    resume_json_text = _resume_to_pretty_json(current_resume)
+    cover_letter_text = str(cover_letter_record.get("cover_letter_text") or "").strip()
+
+    if request.method == "POST":
+        header_title = str(request.form.get("header_title") or "").strip()
+        resume_json_text = str(request.form.get("resume_json") or "").strip()
+        cover_letter_text = str(request.form.get("cover_letter_text") or "").strip()
+
+        try:
+            updated_resume = Resume.model_validate_json(resume_json_text)
+        except ValidationError as exc:
+            save_error = str(exc)
+        else:
+            resume_path = str(customized_resume_record.get("resume_link") or "").strip()
+            if not resume_path:
+                abort(500, "Existing resume path is missing.")
+
+            try:
+                resume_pdf = pdf_generator.create_resume_pdf(
+                    updated_resume,
+                    header_title=header_title,
+                )
+            except Exception as exc:
+                save_error = f"Failed to regenerate resume PDF: {exc}"
+            else:
+                uploaded_resume_path = supabase_utils.upload_customized_resume_to_storage(
+                    resume_pdf,
+                    resume_path,
+                )
+                if not uploaded_resume_path:
+                    save_error = "Failed to upload the updated resume PDF."
+                elif not supabase_utils.update_customized_resume(
+                    customized_resume_id,
+                    updated_resume,
+                    uploaded_resume_path,
+                    header_title=header_title,
+                ):
+                    save_error = "Failed to update the customized resume record."
+                else:
+                    if cover_letter_text:
+                        cover_letter_path = str(cover_letter_record.get("cover_letter_link") or "").strip()
+                        if not cover_letter_path:
+                            cover_letter_path = _build_cover_letter_storage_path(
+                                cleaned_job_id,
+                                job_record.get("company"),
+                            )
+
+                        try:
+                            cover_letter_pdf = create_cover_letter_pdf(
+                                applicant_name=updated_resume.name,
+                                email=updated_resume.email,
+                                phone=updated_resume.phone,
+                                location=updated_resume.location,
+                                cover_letter_text=cover_letter_text,
+                            )
+                        except Exception as exc:
+                            save_error = f"Resume saved, but cover letter PDF failed: {exc}"
+                        else:
+                            uploaded_cover_letter_path = supabase_utils.upload_cover_letter_to_storage(
+                                cover_letter_pdf,
+                                cover_letter_path,
+                            )
+                            if not uploaded_cover_letter_path:
+                                save_error = "Resume saved, but cover letter upload failed."
+                            else:
+                                cover_letter_id = supabase_utils.save_customized_cover_letter(
+                                    job_id=cleaned_job_id,
+                                    customized_resume_id=customized_resume_id,
+                                    company=str(job_record.get("company") or "").strip(),
+                                    job_title=str(job_record.get("job_title") or "").strip(),
+                                    cover_letter_text=cover_letter_text,
+                                    cover_letter_path=uploaded_cover_letter_path,
+                                    llm_model="manual_edit",
+                                )
+                                if not cover_letter_id:
+                                    save_error = "Resume saved, but cover letter record update failed."
+
+                    if not save_error:
+                        return redirect(url_for("edit_documents", job_id=cleaned_job_id, saved=1))
+
+            if not save_error:
+                save_error = "Unable to save your manual edits."
+
+    return render_template(
+        "edit_documents.html",
+        job=job_record,
+        header_title=header_title,
+        resume_json=resume_json_text,
+        cover_letter_text=cover_letter_text,
+        save_error=save_error,
+        save_success=save_success,
+        resume_download_url=url_for("download_resume", resume_id=customized_resume_id),
+        cover_letter_download_url=(
+            url_for("download_cover_letter", job_id=cleaned_job_id)
+            if cover_letter_record.get("cover_letter_link")
+            else ""
+        ),
+    )
+
+
 @app.post("/run")
 def run_action():
     current = _snapshot_state()
@@ -337,6 +637,7 @@ def run_action():
 
     action = (request.form.get("action") or "").strip()
     job_id = (request.form.get("job_id") or "").strip()
+    email_override = (request.form.get("email_override") or "").strip()
     count_raw = (request.form.get("count") or "").strip()
     count = None
     if count_raw:
@@ -346,7 +647,7 @@ def run_action():
             return jsonify({"ok": False, "error": "Resume count must be a valid integer."}), 400
 
     try:
-        label, command = _build_command(action, job_id or None, count)
+        label, command = _build_command(action, job_id or None, count, email_override or None)
     except ValueError as exc:
         return jsonify({"ok": False, "error": str(exc)}), 400
 
