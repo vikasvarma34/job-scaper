@@ -13,6 +13,8 @@
   --success: #0f766e;
   --warning: #b45309;
   --danger: #b42318;
+  --muted-soft: #edf1f6;
+  --warning-soft: rgba(180, 83, 9, 0.1);
   --shadow-sm: 0 8px 20px rgba(15, 23, 42, 0.06);
   --shadow-md: 0 18px 42px rgba(15, 23, 42, 0.09);
   --radius-lg: 22px;
@@ -472,7 +474,7 @@ h2 {
 }
 
 .resume-state {
-  background: #edf1f6;
+  background: var(--muted-soft);
   color: var(--muted);
 }
 
@@ -548,12 +550,12 @@ h2 {
 }
 
 .applied-label.not-available {
-  background: #edf1f6;
+  background: var(--muted-soft);
   color: var(--muted);
 }
 
 .resume-state.text-saved {
-  background: rgba(180, 83, 9, 0.1);
+  background: var(--warning-soft);
   color: var(--warning);
 }
 
