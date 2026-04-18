@@ -552,7 +552,7 @@ h2 {
   color: var(--muted);
 }
 
-@media (min-width: 820px) {
+@media (min-width: 821px) {
   .hero-panel {
     grid-template-columns: minmax(0, 1.45fr) minmax(280px, 0.85fr);
   }
@@ -576,7 +576,7 @@ h2 {
   }
 }
 
-@media (max-width: 819px) {
+@media (max-width: 820px) {
   .page-shell {
     width: min(100% - 16px, 100%);
     padding-top: 18px;
