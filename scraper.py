@@ -5,7 +5,8 @@ import time
 import random 
 import logging
 import re
-from urllib.parse import urlencode
+from html import unescape
+from urllib.parse import urlencode, urlparse, urlunparse
 from pydantic import BaseModel, Field
 import config
 import user_agents
@@ -15,7 +16,8 @@ from markdownify import markdownify as md
 import json
 
 # --- Setup Logging ---
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+LOG_LEVEL = getattr(logging, str(getattr(config, "SCRAPER_LOG_LEVEL", "INFO")).upper(), logging.INFO)
+logging.basicConfig(level=LOG_LEVEL, format='%(asctime)s - %(levelname)s - %(message)s')
 USE_CONFIG_GEO_ID = object()
 
 
@@ -34,7 +36,7 @@ def convert_html_to_markdown(html: str) -> str | None:
     No LLM API calls are made — this is entirely local.
     """
     if not html or not html.strip():
-        logging.info("Received empty HTML for Markdown conversion, returning empty string.")
+        logging.debug("Received empty HTML for Markdown conversion, returning empty string.")
         return ""
 
     try:
@@ -67,7 +69,7 @@ def convert_html_to_markdown(html: str) -> str | None:
                 prev_blank = False
         markdown_text = '\n'.join(cleaned_lines).strip()
 
-        logging.info("Successfully converted HTML to Markdown.")
+        logging.debug("Successfully converted HTML to Markdown.")
         return markdown_text if markdown_text else ""
     except Exception as e:
         logging.error(f"Error during HTML to Markdown conversion: {e}")
@@ -152,21 +154,25 @@ def _extract_experience_requirement(description: str | None) -> str | None:
         return None
 
     patterns = [
-        r"(\d+)\s*(?:-|to)\s*(\d+)\s+years? of experience",
-        r"(\d+)\s*-\s*(\d+)\s+years? experience",
-        r"at least (\d+)\+?\s+years? of experience",
-        r"minimum of (\d+)\+?\s+years? of experience",
-        r"(\d+)\+?\s+years? of experience",
-        r"(\d+)\+?\s+years? experience",
+        (r"(\d+)\s*(?:-|–|—|to)\s*(\d+)\s*(?:years?|yrs?|yr)\b(?:\s+of)?\s+experience", "range"),
+        (r"experience\s*(?:of|:)?\s*(\d+)\s*(?:-|–|—|to)\s*(\d+)\s*(?:years?|yrs?|yr)\b", "range"),
+        (r"(?:at least|minimum(?: of)?|minimum|required|requires|need|needs)\s*(\d+)\+?\s*(?:years?|yrs?|yr)\b(?:\s+of)?\s+experience", "plus"),
+        (r"(\d+)\+\s*(?:years?|yrs?|yr)\b(?:\s+of)?\s+experience", "plus"),
+        (r"(\d+)\s*(?:or more|and above|plus)\s*(?:years?|yrs?|yr)\b(?:\s+of)?\s+experience", "plus"),
+        (r"(\d+)\+\s*(?:years?|yrs?|yr)\b", "plus"),
+        (r"(\d+)\s*(?:or more|and above|plus)\s*(?:years?|yrs?|yr)\b", "plus"),
+        (r"(\d+)\s*(?:years?|yrs?|yr)\b(?:\s+of)?\s+experience", "exact"),
     ]
 
-    for pattern in patterns:
+    for pattern, pattern_type in patterns:
         match = re.search(pattern, text)
         if not match:
             continue
-        if match.lastindex and match.lastindex >= 2:
+        if pattern_type == "range" and match.lastindex and match.lastindex >= 2:
             return f"{match.group(1)}-{match.group(2)} years"
-        return f"{match.group(1)}+ years"
+        if pattern_type == "plus":
+            return f"{match.group(1)}+ years"
+        return f"{match.group(1)} years"
 
     return None
 
@@ -182,6 +188,62 @@ def _get_min_years_experience(description: str | None) -> int | None:
         return int(match.group(1))
     except ValueError:
         return None
+
+
+def _get_experience_year_bounds(description: str | None) -> tuple[int | None, int | None, bool]:
+    """
+    Returns (min_years, max_years, is_open_ended_plus_form) from the parsed requirement text.
+    Examples:
+    - "1-3 years" -> (1, 3, False)
+    - "3+ years" -> (3, None, True)
+    - "4 years" -> (4, 4, False)
+    """
+    requirement = _extract_experience_requirement(description)
+    if not requirement:
+        return None, None, False
+
+    numbers = re.findall(r"\d+", requirement)
+    if not numbers:
+        return None, None, False
+
+    try:
+        parsed_numbers = [int(value) for value in numbers]
+    except ValueError:
+        return None, None, False
+
+    if len(parsed_numbers) >= 2:
+        return parsed_numbers[0], parsed_numbers[1], False
+
+    min_years = parsed_numbers[0]
+    if "+" in requirement:
+        return min_years, None, True
+    return min_years, min_years, False
+
+
+def _passes_experience_requirement(description: str | None) -> bool:
+    """
+    Hard gate for roles that clearly ask for more experience than the target.
+    Missing or unparseable experience remains allowed.
+    """
+    max_allowed_years = int(
+        getattr(
+            config,
+            "LINKEDIN_MAX_ALLOWED_MIN_EXPERIENCE_YEARS",
+            getattr(config, "LINKEDIN_MAX_ALLOWED_EXPERIENCE_YEARS", 0),
+        )
+        or 0
+    )
+    if max_allowed_years <= 0:
+        return True
+
+    min_years, max_years, is_open_ended = _get_experience_year_bounds(description)
+    if min_years is None and max_years is None:
+        return True
+
+    if min_years is not None and min_years > max_allowed_years:
+        return False
+
+    return True
 
 
 def _build_description_excerpt(description: str | None, max_chars: int = 280) -> str:
@@ -289,74 +351,359 @@ def _normalize_text(value: str | None) -> str:
     return (value or "").strip().lower()
 
 
+def _normalize_url_for_match(raw_url: str | None) -> str:
+    cleaned = str(raw_url or "").strip()
+    if not cleaned:
+        return ""
+    if not re.match(r"^https?://", cleaned, flags=re.IGNORECASE):
+        cleaned = "https://" + cleaned
+    parsed = urlparse(cleaned)
+    netloc = (parsed.netloc or "").lower().strip()
+    if netloc.startswith("www."):
+        netloc = netloc[4:]
+    normalized = parsed._replace(
+        scheme=(parsed.scheme or "https").lower(),
+        netloc=netloc,
+        query="",
+        fragment="",
+        path=(parsed.path or "").rstrip("/"),
+    )
+    return urlunparse(normalized)
+
+
+def _normalize_location_for_match(location: str | None) -> str:
+    normalized = _normalize_text(location)
+    if not normalized:
+        return ""
+
+    alias_map = {
+        "bangalore": "bengaluru",
+        "new delhi": "delhi",
+        "gurugram": "gurgaon",
+    }
+    allowed_keywords = getattr(config, "LINKEDIN_ALLOWED_CITY_KEYWORDS", None) or []
+    for keyword in allowed_keywords:
+        cleaned_keyword = _normalize_text(keyword)
+        if cleaned_keyword and cleaned_keyword in normalized:
+            return alias_map.get(cleaned_keyword, cleaned_keyword)
+
+    first_part = re.split(r"[,/|-]", normalized, maxsplit=1)[0]
+    compact = re.sub(r"[^a-z0-9\s]", " ", first_part)
+    compact = re.sub(r"\s+", " ", compact).strip()
+    return alias_map.get(compact, compact)
+
+
+def _canonicalize_title_for_match(title: str | None) -> str:
+    normalized = _normalize_text(title)
+    if not normalized:
+        return ""
+
+    normalized = re.sub(r"\([^)]*\)", " ", normalized)
+    normalized = re.sub(r"\[[^\]]*\]", " ", normalized)
+    normalized = re.sub(r"\b\d+\s*(?:\+|(?:-|–|—)\s*\d+)?\s*(?:years?|yrs?|yr|yoe|exp)\b", " ", normalized)
+    normalized = normalized.replace("full stack", "fullstack")
+    normalized = normalized.replace("full-stack", "fullstack")
+    normalized = normalized.replace("back end", "backend")
+    normalized = normalized.replace("back-end", "backend")
+    normalized = normalized.replace("front end", "frontend")
+    normalized = normalized.replace("front-end", "frontend")
+    normalized = normalized.replace("react js", "react")
+    normalized = normalized.replace("reactjs", "react")
+    normalized = normalized.replace("angular js", "angular")
+    normalized = normalized.replace("angularjs", "angular")
+    normalized = normalized.replace("spring boot", "springboot")
+    normalized = normalized.replace("micro services", "microservices")
+    normalized = re.sub(r"[^a-z0-9+#.\s]", " ", normalized)
+
+    stopwords = {
+        "a",
+        "an",
+        "and",
+        "for",
+        "the",
+        "of",
+        "to",
+        "in",
+        "hiring",
+        "urgent",
+        "opening",
+        "openings",
+        "position",
+        "role",
+        "job",
+        "required",
+        "preferred",
+        "immediate",
+        "walk",
+        "drive",
+        "with",
+        "only",
+        "years",
+        "year",
+        "yrs",
+        "yr",
+        "exp",
+        "experience",
+    }
+    token_aliases = {
+        "developer": "dev",
+        "engineer": "dev",
+        "sde": "dev",
+        "sdet": "sdet",
+        "associate": "associate",
+        "junior": "entry",
+        "entry": "entry",
+        "graduate": "entry",
+        "software": "software",
+        "application": "software",
+        "backend": "backend",
+        "frontend": "frontend",
+        "fullstack": "fullstack",
+        "java": "java",
+        "springboot": "springboot",
+        "spring": "spring",
+        "react": "react",
+        "angular": "angular",
+        "microservices": "microservices",
+        "sql": "sql",
+        "kafka": "kafka",
+        "node": "node",
+        "node.js": "node",
+        "golang": "golang",
+        "go": "golang",
+        "typescript": "typescript",
+    }
+
+    tokens: set[str] = set()
+    for raw_token in re.findall(r"[a-z0-9+#.]+", normalized):
+        if not raw_token or raw_token in stopwords or raw_token.isdigit():
+            continue
+        if re.fullmatch(r"[ivx]+", raw_token):
+            continue
+        mapped = token_aliases.get(raw_token, raw_token)
+        if mapped and mapped not in stopwords and not mapped.isdigit():
+            tokens.add(mapped)
+
+    return " ".join(sorted(tokens))
+
+
+def _build_job_match_keys(job: dict) -> set[str]:
+    keys: set[str] = set()
+
+    provider = _normalize_text(job.get("provider"))
+    job_id = str(job.get("job_id") or "").strip()
+    if provider and job_id:
+        keys.add(f"id:{provider}:{job_id}")
+
+    normalized_url = _normalize_url_for_match(job.get("job_url"))
+    if normalized_url:
+        keys.add(f"url:{normalized_url}")
+
+    company = _normalize_text(job.get("company"))
+    title_key = _canonicalize_title_for_match(job.get("job_title"))
+    location_key = _normalize_location_for_match(job.get("location"))
+    if company and title_key and location_key:
+        keys.add(f"role:{company}|{location_key}|{title_key}")
+    elif company and title_key:
+        keys.add(f"role:{company}|{title_key}")
+
+    return keys
+
+
+def _collect_job_match_keys(jobs: list[dict]) -> set[str]:
+    match_keys: set[str] = set()
+    for job in jobs:
+        match_keys.update(_build_job_match_keys(job))
+    return match_keys
+
+
+def _dedupe_jobs_by_match_keys(jobs: list[dict]) -> list[dict]:
+    unique_jobs: list[dict] = []
+    seen_match_keys: set[str] = set()
+    for job in jobs:
+        match_keys = _build_job_match_keys(job)
+        if match_keys and match_keys & seen_match_keys:
+            continue
+        unique_jobs.append(job)
+        seen_match_keys.update(match_keys)
+    return unique_jobs
+
+
+def _count_keyword_hits(text: str, keywords: list[str] | tuple[str, ...]) -> int:
+    normalized = _normalize_text(text)
+    if not normalized:
+        return 0
+    matched: set[str] = set()
+    for keyword in keywords:
+        cleaned_keyword = _normalize_text(keyword)
+        if cleaned_keyword and cleaned_keyword in normalized:
+            matched.add(cleaned_keyword)
+    return len(matched)
+
+
 def _local_job_fit_score(job: dict) -> int:
     """
-    Lightweight fit score tuned for early/mid full-stack and software roles.
+    Lightweight fit score tuned for early-career Java/full-stack/backend roles.
     Higher is better.
     """
     title = _normalize_text(job.get("job_title"))
     level = _normalize_text(job.get("level"))
+    description = _normalize_text(job.get("description"))
 
     score = 0
 
-    positive_title_keywords = [
-        "full stack engineer",
-        "full stack developer",
-        "fullstack engineer",
-        "fullstack developer",
-        "software engineer",
-        "software developer",
-        "application developer",
-        "java full stack",
-        "java fullstack",
-        "backend",
-        "back-end",
-        "sde",
-        "java",
-        "spring",
-        "node",
-        "python",
-        "go",
-        "graphql",
-        "api",
-        "microservice",
+    weighted_title_keywords = [
+        ("java full stack", 10),
+        ("java fullstack", 10),
+        ("java backend developer", 9),
+        ("java backend engineer", 9),
+        ("associate java developer", 9),
+        ("developer associate", 8),
+        ("associate software engineer", 8),
+        ("java developer", 8),
+        ("java software engineer", 8),
+        ("full stack developer", 7),
+        ("full stack engineer", 7),
+        ("fullstack developer", 7),
+        ("fullstack engineer", 7),
+        ("backend developer", 7),
+        ("backend engineer", 7),
+        ("application developer", 5),
+        ("software engineer ii", 5),
+        ("software engineer 2", 5),
+        ("engineer ii", 4),
+        ("sde-1", 4),
+        ("sde 1", 4),
+        ("sde i", 4),
+        ("sde ii", 3),
+        ("software engineer", 2),
+        ("software developer", 2),
     ]
-    if any(k in title for k in positive_title_keywords):
-        score += 6
+    for keyword, points in weighted_title_keywords:
+        if keyword in title:
+            score += points
 
-    mid_keywords = ["sde-1", "sde i", "engineer i", "engineer ii", "software engineer 2", "junior", "associate", "mid"]
-    if any(k in title for k in mid_keywords):
+    stack_keywords = [
+        "java",
+        "spring boot",
+        "spring",
+        "react",
+        "angular",
+        "node.js",
+        "node",
+        "microservice",
+        "rest",
+        "api",
+        "sql",
+        "kafka",
+        "golang",
+        "go ",
+        "typescript",
+    ]
+    score += min(8, _count_keyword_hits(title, stack_keywords) * 2)
+
+    level_keywords = ["entry", "associate", "mid", "junior", "graduate"]
+    title_progression_keywords = ["junior", "associate", "engineer i", "engineer ii", "software engineer ii", "developer associate"]
+
+    if any(keyword in title for keyword in title_progression_keywords):
         score += 3
 
     if "not applicable" in level or level == "":
         score += 1
-    elif any(k in level for k in ["entry", "associate", "mid", "junior"]):
+    elif any(k in level for k in level_keywords):
         score += 3
 
     min_years_experience = _get_min_years_experience(job.get("description"))
     if min_years_experience is not None:
         if min_years_experience <= 3:
             score += 3
-        elif min_years_experience <= 5:
+        elif min_years_experience <= 4:
             score += 1
+        elif min_years_experience == 5:
+            score -= 2
         elif min_years_experience >= 6:
             score -= 6
 
-    negative_keywords = [
-        "frontend", "front-end", "front end", "angular", "ui", "ux",
-        "react native", "mobile", "android", "ios",
-        "support engineer", "application support", "technical support",
-        "qa", "sdet", "test engineer", "automation engineer",
-        "devops", "site reliability", "sre",
-        "senior", "lead", "principal", "architect", "manager", "director",
-        "staff engineer", "head of", "vp ",
+    if description:
+        score += min(10, _count_keyword_hits(description, stack_keywords))
+
+    generic_title = any(keyword in title for keyword in ["software engineer", "software developer", "engineer", "developer"])
+    strong_title_signal = any(
+        keyword in title
+        for keyword in [
+            "java full stack",
+            "java fullstack",
+            "full stack",
+            "fullstack",
+            "backend",
+            "developer associate",
+            "associate software engineer",
+            "associate java developer",
+            "java developer",
+            "java software engineer",
+        ]
+    )
+    if generic_title and not strong_title_signal:
+        score -= 2
+
+    negative_title_keywords = [
+        "senior",
+        "lead",
+        "principal",
+        "architect",
+        "manager",
+        "director",
+        "staff engineer",
+        "head of",
+        "vp ",
+        "frontend",
+        "front-end",
+        "front end",
+        "ui",
+        "ux",
+        "react native",
+        "mobile",
+        "android",
+        "ios",
+        "support engineer",
+        "application support",
+        "technical support",
+        "qa",
+        "sdet",
+        "software engineer in test",
+        "test engineer",
+        "automation engineer",
+        "verification",
+        "testing",
+        "devops",
+        "site reliability",
+        "sre",
+        "consultant",
+        "analyst",
+        "oracle apps",
+        "d365",
+        "product testing",
+        "walk in drive",
     ]
-    for keyword in negative_keywords:
+    for keyword in negative_title_keywords:
         if keyword in title:
             score -= 8
 
     if "intern" in title:
         score -= 10
+
+    negative_description_keywords = [
+        "support team",
+        "service desk",
+        "salesforce",
+        "servicenow",
+        "manual testing",
+        "oracle apps",
+        "erp consultant",
+        "product testing",
+        "call center",
+    ]
+    score -= min(10, _count_keyword_hits(description, negative_description_keywords) * 2)
 
     return score
 
@@ -458,22 +805,16 @@ def _shortlist_with_company_diversity(
     max_per_company: int,
 ) -> list[dict]:
     """
-    Local fallback shortlist with company diversity and dedupe by company+title.
+    Local fallback shortlist with company diversity and semantic dedupe.
     """
     if target_count <= 0:
         return []
 
-    # Dedupe by (company, title) first
-    unique = []
-    seen_company_title = set()
-    for c in candidates:
-        company = _normalize_text(c.get("company"))
-        title = _normalize_text(c.get("job_title"))
-        key = (company, title)
-        if key in seen_company_title:
-            continue
-        seen_company_title.add(key)
-        unique.append(c)
+    unique = _dedupe_jobs_by_match_keys(candidates)
+
+    min_fit_score = int(getattr(config, "LINKEDIN_MIN_SHORTLIST_FIT_SCORE", 0))
+    if min_fit_score > 0:
+        unique = [candidate for candidate in unique if _local_job_fit_score(candidate) >= min_fit_score]
 
     # Rank best first
     ranked = sorted(unique, key=_local_job_fit_score, reverse=True)
@@ -493,7 +834,7 @@ def _shortlist_with_company_diversity(
     strict_diversity = bool(getattr(config, "LINKEDIN_STRICT_COMPANY_DIVERSITY", False))
 
     # If still short, optionally fill regardless of company cap (but keep dedupe)
-    if len(selected) < target_count and not strict_diversity:
+    if len(selected) < target_count and not strict_diversity and min_fit_score <= 0:
         selected_ids = {str(c.get("job_id")) for c in selected if c.get("job_id")}
         for c in ranked:
             if len(selected) >= target_count:
@@ -505,6 +846,343 @@ def _shortlist_with_company_diversity(
             selected_ids.add(jid)
 
     return selected
+
+
+def _normalize_source_job_id(provider: str, raw_job_id: str | None) -> str:
+    cleaned_provider = _normalize_text(provider)
+    cleaned_job_id = str(raw_job_id or "").strip()
+    if not cleaned_provider or not cleaned_job_id:
+        return ""
+    if cleaned_provider == "linkedin":
+        return cleaned_job_id
+    return f"{cleaned_provider}:{cleaned_job_id}"
+
+
+def _raw_provider_job_id(job_id: str | None) -> str:
+    cleaned_job_id = str(job_id or "").strip()
+    if ":" in cleaned_job_id:
+        return cleaned_job_id.split(":", 1)[1]
+    return cleaned_job_id
+
+
+def _extract_primary_location_name(location: str | None) -> str:
+    parts = [part.strip() for part in str(location or "").split(",") if part.strip()]
+    return parts[0] if parts else str(location or "").strip()
+
+
+def _slugify_for_url_fragment(value: str | None) -> str:
+    normalized = _normalize_text(value)
+    normalized = re.sub(r"[^a-z0-9]+", "-", normalized)
+    return normalized.strip("-")
+
+
+def _source_preference_rank(provider: str | None) -> int:
+    source_priority = getattr(config, "SCRAPER_SOURCE_PRIORITY", None) or {}
+    return int(source_priority.get(_normalize_text(provider), 0))
+
+
+def _parse_posted_at_value(posted_at: str | None) -> datetime | None:
+    cleaned = str(posted_at or "").strip()
+    if not cleaned:
+        return None
+
+    for fmt in (
+        "%Y-%m-%d %H:%M:%S.%f",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S.%fZ",
+        "%Y-%m-%dT%H:%M:%S.%f",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d",
+    ):
+        try:
+            return datetime.strptime(cleaned, fmt)
+        except ValueError:
+            continue
+
+    try:
+        return datetime.fromisoformat(cleaned.replace("Z", "+00:00")).replace(tzinfo=None)
+    except ValueError:
+        return None
+
+
+def _job_rank_tuple(job: dict) -> tuple[int, int, int, int]:
+    fit_score = int(job.get("local_fit_score") or _local_job_fit_score(job))
+    posted_dt = _parse_posted_at_value(job.get("posted_at"))
+    posted_score = int(posted_dt.timestamp()) if posted_dt else 0
+    source_score = _source_preference_rank(job.get("provider"))
+    completeness_score = sum(
+        1 for field_name in ("job_url", "description", "company", "job_title", "location")
+        if str(job.get(field_name) or "").strip()
+    )
+    return fit_score, posted_score, source_score, completeness_score
+
+
+def _rank_and_limit_candidates(candidates: list[dict], candidate_limit: int) -> list[dict]:
+    unique_candidates = _dedupe_jobs_by_match_keys(candidates)
+    for candidate in unique_candidates:
+        if "local_fit_score" not in candidate:
+            candidate["local_fit_score"] = _local_job_fit_score(candidate)
+    ranked = sorted(unique_candidates, key=_job_rank_tuple, reverse=True)
+    if candidate_limit > 0:
+        return ranked[:candidate_limit]
+    return ranked
+
+
+def _shortlist_with_source_quotas(
+    candidates: list[dict],
+    target_count: int,
+    max_per_company: int,
+    source_caps: dict[str, int] | None = None,
+) -> list[dict]:
+    if target_count <= 0:
+        return []
+
+    source_caps = {
+        _normalize_text(source): int(cap)
+        for source, cap in (source_caps or {}).items()
+        if int(cap) > 0
+    }
+    min_fit_score = int(getattr(config, "LINKEDIN_MIN_SHORTLIST_FIT_SCORE", 0))
+
+    unique_candidates = _rank_and_limit_candidates(candidates, 0)
+    if min_fit_score > 0:
+        unique_candidates = [
+            candidate for candidate in unique_candidates
+            if int(candidate.get("local_fit_score") or 0) >= min_fit_score
+        ]
+
+    ranked = sorted(unique_candidates, key=_job_rank_tuple, reverse=True)
+    selected: list[dict] = []
+    company_counts: dict[str, int] = {}
+    source_counts: dict[str, int] = {}
+    selected_ids: set[str] = set()
+
+    def _can_select(job: dict, enforce_source_cap: bool) -> bool:
+        provider = _normalize_text(job.get("provider"))
+        company = _normalize_text(job.get("company")) or "unknown_company"
+        if company_counts.get(company, 0) >= max_per_company:
+            return False
+        if enforce_source_cap and provider in source_caps:
+            if source_counts.get(provider, 0) >= source_caps[provider]:
+                return False
+        return True
+
+    for enforce_source_cap in (True, False):
+        for job in ranked:
+            if len(selected) >= target_count:
+                break
+            job_id = str(job.get("job_id") or "").strip()
+            if not job_id or job_id in selected_ids:
+                continue
+            if not _can_select(job, enforce_source_cap):
+                continue
+
+            provider = _normalize_text(job.get("provider"))
+            company = _normalize_text(job.get("company")) or "unknown_company"
+            selected.append(job)
+            selected_ids.add(job_id)
+            company_counts[company] = company_counts.get(company, 0) + 1
+            source_counts[provider] = source_counts.get(provider, 0) + 1
+
+    return selected
+
+
+def _augment_description_with_experience(
+    description: str | None,
+    min_exp: str | int | None,
+    max_exp: str | int | None,
+) -> str:
+    cleaned_description = str(description or "").strip()
+    min_exp_text = str(min_exp or "").strip()
+    max_exp_text = str(max_exp or "").strip()
+    experience_line = ""
+
+    if min_exp_text and max_exp_text:
+        if min_exp_text == max_exp_text:
+            experience_line = f"Experience required: {min_exp_text} years."
+        else:
+            experience_line = f"Experience required: {min_exp_text}-{max_exp_text} years."
+    elif min_exp_text:
+        experience_line = f"Experience required: {min_exp_text}+ years."
+    elif max_exp_text:
+        experience_line = f"Experience required: up to {max_exp_text} years."
+
+    if experience_line and cleaned_description:
+        return f"{experience_line}\n\n{cleaned_description}"
+    if experience_line:
+        return experience_line
+    return cleaned_description
+
+
+def _build_absolute_url(base_url: str, raw_url: str | None) -> str:
+    cleaned_url = str(raw_url or "").strip()
+    if not cleaned_url:
+        return ""
+    if cleaned_url.startswith("http://") or cleaned_url.startswith("https://"):
+        return cleaned_url
+    if cleaned_url.startswith("/"):
+        return f"{base_url.rstrip('/')}{cleaned_url}"
+    return f"{base_url.rstrip('/')}/{cleaned_url.lstrip('/')}"
+
+
+def _naukri_headers(referer_url: str | None = None) -> dict[str, str]:
+    headers = {
+        "User-Agent": random.choice(user_agents.USER_AGENTS),
+        "Accept": "application/json,text/plain,*/*",
+        "appid": "109",
+        "systemid": "109",
+        "origin": "https://www.naukri.com",
+    }
+    if referer_url:
+        headers["referer"] = referer_url
+    return headers
+
+
+def _build_naukri_referer_url(search_query: str, location: str) -> str:
+    query_slug = _slugify_for_url_fragment(search_query)
+    location_slug = _slugify_for_url_fragment(_extract_primary_location_name(location))
+    return f"https://www.naukri.com/{query_slug}-jobs-in-{location_slug}"
+
+
+def _normalize_naukri_description(raw_description: str | None) -> str:
+    text = str(raw_description or "").strip()
+    if not text:
+        return ""
+    markdown_text = convert_html_to_markdown(text)
+    if markdown_text is not None:
+        return markdown_text
+    plain_text = BeautifulSoup(unescape(text), "html.parser").get_text(" ", strip=True)
+    return re.sub(r"\s+", " ", plain_text).strip()
+
+
+def _fetch_naukri_search_results(search_query: str, location: str) -> list[dict]:
+    search_results: list[dict] = []
+    referer_url = _build_naukri_referer_url(search_query, location)
+    headers = _naukri_headers(referer_url=referer_url)
+    primary_location = _extract_primary_location_name(location)
+    max_pages = max(1, int(getattr(config, "NAUKRI_MAX_PAGES_PER_QUERY", 1)))
+    results_per_page = max(1, int(getattr(config, "NAUKRI_RESULTS_PER_PAGE", 10)))
+    freshness_days = max(1, int(getattr(config, "NAUKRI_FRESHNESS_DAYS", 1)))
+
+    for page_number in range(1, max_pages + 1):
+        params = {
+            "keyword": search_query,
+            "location": primary_location,
+            "noOfResults": str(results_per_page),
+            "experience": f"0,{int(getattr(config, 'LINKEDIN_MAX_ALLOWED_MIN_EXPERIENCE_YEARS', 3))}",
+            "freshness": str(freshness_days),
+            "sort": "f",
+            "pageNo": str(page_number),
+        }
+        try:
+            response = requests.get(
+                "https://www.naukri.com/jobapi/v2/search",
+                headers=headers,
+                params=params,
+                timeout=config.REQUEST_TIMEOUT,
+            )
+            response.raise_for_status()
+            data = response.json()
+        except Exception as e:
+            logging.error(
+                "Failed to fetch Naukri search results for query '%s' and location '%s': %s",
+                search_query,
+                location,
+                e,
+            )
+            break
+
+        current_page_results = data.get("list") or []
+        if not current_page_results:
+            break
+
+        search_results.extend(current_page_results)
+        total_pages = int(data.get("totalpages") or 0)
+        if total_pages and page_number >= total_pages:
+            break
+
+    return search_results
+
+
+def _build_naukri_candidate_stub(search_item: dict, fallback_location: str) -> dict | None:
+    raw_job_id = str(search_item.get("jobId") or "").strip()
+    normalized_job_id = _normalize_source_job_id("naukri", raw_job_id)
+    if not normalized_job_id:
+        return None
+
+    location_text = fallback_location
+    job_url = _build_absolute_url(
+        "https://www.naukri.com",
+        search_item.get("urlStr") or search_item.get("job_static_url"),
+    )
+    description = _normalize_naukri_description(search_item.get("jobDesc") or search_item.get("tupleDesc"))
+    description = _augment_description_with_experience(
+        description,
+        search_item.get("minExp"),
+        search_item.get("maxExp"),
+    )
+
+    return {
+        "job_id": normalized_job_id,
+        "job_url": job_url,
+        "company": search_item.get("companyName") or search_item.get("CONTCOM"),
+        "job_title": search_item.get("post"),
+        "location": location_text,
+        "level": search_item.get("level"),
+        "description": description,
+        "posted_at": search_item.get("addDate"),
+        "provider": "naukri",
+    }
+
+
+def _fetch_naukri_job_details(job_id: str, search_query: str, location: str) -> dict | None:
+    raw_job_id = _raw_provider_job_id(job_id)
+    if not raw_job_id:
+        return None
+
+    referer_url = _build_naukri_referer_url(search_query, location)
+    headers = _naukri_headers(referer_url=referer_url)
+    job_data = None
+
+    for api_url in (
+        f"https://www.naukri.com/jobapi/v2/job/{raw_job_id}",
+        f"https://www.naukri.com/jobapi/v1/job/{raw_job_id}",
+    ):
+        try:
+            response = requests.get(api_url, headers=headers, timeout=config.REQUEST_TIMEOUT)
+            response.raise_for_status()
+            payload = response.json()
+            job_data = payload.get("job") if isinstance(payload, dict) else None
+            if job_data:
+                break
+        except Exception as e:
+            logging.warning("Naukri job details fetch failed for %s via %s: %s", raw_job_id, api_url, e)
+
+    if not job_data:
+        return None
+
+    description = _normalize_naukri_description(job_data.get("jobDesc"))
+    description = _augment_description_with_experience(
+        description,
+        job_data.get("minExp"),
+        job_data.get("maxExp"),
+    )
+    job_url = _build_absolute_url(
+        "https://www.naukri.com",
+        job_data.get("urlStr") or job_data.get("job_static_url"),
+    )
+
+    return {
+        "job_id": _normalize_source_job_id("naukri", raw_job_id),
+        "job_url": job_url,
+        "company": job_data.get("companyName") or job_data.get("CONTCOM"),
+        "job_title": job_data.get("post"),
+        "location": location,
+        "level": job_data.get("level"),
+        "description": description,
+        "posted_at": job_data.get("addDate"),
+        "provider": "naukri",
+    }
 
 # --- LinkedIn Scraping Logic ---
 def _fetch_linkedin_job_cards(search_query: str, location: str, geo_id_override=USE_CONFIG_GEO_ID) -> list[dict]:
@@ -544,16 +1222,14 @@ def _fetch_linkedin_job_cards(search_query: str, location: str, geo_id_override=
             min_delay = float(getattr(config, "LINKEDIN_SEARCH_PAGE_MIN_DELAY_SECONDS", 5.0))
             max_delay = float(getattr(config, "LINKEDIN_SEARCH_PAGE_MAX_DELAY_SECONDS", 15.0))
             sleep_time = random.uniform(min(min_delay, max_delay), max(min_delay, max_delay))
-            logging.info(f"Waiting for {sleep_time:.2f} seconds before next request...")
+            logging.debug(f"Waiting for {sleep_time:.2f} seconds before next request...")
             time.sleep(sleep_time)
 
         user_agent = random.choice(user_agents.USER_AGENTS)
         headers = {'User-Agent': user_agent}
     
-        logging.info(f"Using User-Agent: {user_agent}")
-
-    
-        logging.info(f"Scraping URL: {target_url}")
+        logging.debug(f"Using User-Agent: {user_agent}")
+        logging.debug(f"Scraping URL: {target_url}")
 
         res = None 
         retries = 0
@@ -573,7 +1249,7 @@ def _fetch_linkedin_job_cards(search_query: str, location: str, geo_id_override=
                     user_agent = random.choice(user_agents.USER_AGENTS)
                     headers = {'User-Agent': user_agent}
                 
-                    logging.info(f"Retrying with new User-Agent: {user_agent}")
+                    logging.debug(f"Retrying with new User-Agent: {user_agent}")
                     continue
                 else:
                     
@@ -593,7 +1269,7 @@ def _fetch_linkedin_job_cards(search_query: str, location: str, geo_id_override=
 
         if not res.text:
             
-             logging.info(f"Received empty response text at start={start}, stopping.")
+             logging.debug(f"Received empty response text at start={start}, stopping.")
              break
 
         soup = BeautifulSoup(res.text, 'html.parser')
@@ -601,11 +1277,11 @@ def _fetch_linkedin_job_cards(search_query: str, location: str, geo_id_override=
 
         if not all_jobs_on_this_page:
             
-             logging.info(f"No job listings ('li' elements) found on page at start={start}, stopping.")
+             logging.debug(f"No job listings ('li' elements) found on page at start={start}, stopping.")
              break
 
     
-        logging.info(f"Found {len(all_jobs_on_this_page)} potential job elements on this page.")
+        logging.debug(f"Found {len(all_jobs_on_this_page)} potential job elements on this page.")
 
         jobs_found_this_iteration = 0
         for job_element in all_jobs_on_this_page:
@@ -639,11 +1315,11 @@ def _fetch_linkedin_job_cards(search_query: str, location: str, geo_id_override=
                     pass
 
     
-        logging.info(f"Added {jobs_found_this_iteration} unique job IDs from this page.")
+        logging.debug(f"Added {jobs_found_this_iteration} unique job IDs from this page.")
 
         if jobs_found_this_iteration == 0 and len(all_jobs_on_this_page) > 0:
         
-            logging.info("Found list items but no new job IDs extracted, potentially end of relevant results or parsing issue.")
+            logging.debug("Found list items but no new job IDs extracted, potentially end of relevant results or parsing issue.")
             break
 
         start += 10
@@ -657,22 +1333,20 @@ def _fetch_linkedin_job_details(job_id: str) -> dict | None:
 
     job_detail_url = f"https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/{job_id}"
 
-    logging.info(f"Preparing to fetch details for job ID: {job_id}")
+    logging.debug(f"Preparing to fetch details for job ID: {job_id}")
 
     min_delay = float(getattr(config, "LINKEDIN_DETAIL_MIN_DELAY_SECONDS", 3.0))
     max_delay = float(getattr(config, "LINKEDIN_DETAIL_MAX_DELAY_SECONDS", 10.0))
     sleep_time = random.uniform(min(min_delay, max_delay), max(min_delay, max_delay))
 
-    logging.info(f"Waiting for {sleep_time:.2f} seconds before fetching details...")
+    logging.debug(f"Waiting for {sleep_time:.2f} seconds before fetching details...")
     time.sleep(sleep_time)
 
     user_agent = random.choice(user_agents.USER_AGENTS)
     headers = {'User-Agent': user_agent}
 
-    logging.info(f"Using User-Agent for details: {user_agent}")
-
-
-    logging.info(f"Fetching details from: {job_detail_url}")
+    logging.debug(f"Using User-Agent for details: {user_agent}")
+    logging.debug(f"Fetching details from: {job_detail_url}")
 
     resp = None 
     retries = 0
@@ -691,7 +1365,7 @@ def _fetch_linkedin_job_details(job_id: str) -> dict | None:
                 user_agent = random.choice(user_agents.USER_AGENTS)
                 headers = {'User-Agent': user_agent}
             
-                logging.info(f"Retrying job {job_id} with new User-Agent: {user_agent}")
+                logging.debug(f"Retrying job {job_id} with new User-Agent: {user_agent}")
                 continue
             else:
                 
@@ -709,7 +1383,10 @@ def _fetch_linkedin_job_details(job_id: str) -> dict | None:
 
     try:
         soup = BeautifulSoup(resp.text, 'html.parser')
-        job_details = {"job_id": job_id}
+        job_details = {
+            "job_id": job_id,
+            "job_url": f"https://www.linkedin.com/jobs/view/{job_id}/",
+        }
 
         # --- Extract Company ---
         try:
@@ -727,9 +1404,9 @@ def _fetch_linkedin_job_details(job_id: str) -> dict | None:
 
             if not job_details.get("company"):
                  job_details["company"] = None
-                 print(f"Warning: Could not extract company for job ID {job_id}")
+                 logging.debug(f"Could not extract company for job ID {job_id}")
         except Exception as e:
-            print(f"Error extracting company for job ID {job_id}: {e}")
+            logging.debug(f"Error extracting company for job ID {job_id}: {e}")
             job_details["company"] = None
 
         # --- Extract Job Title ---
@@ -741,7 +1418,7 @@ def _fetch_linkedin_job_details(job_id: str) -> dict | None:
                  if title_h1:
                       job_details["job_title"] = title_h1.text.strip()
         except Exception as e: 
-            print(f"Error extracting job title for job ID {job_id}: {e}")
+            logging.debug(f"Error extracting job title for job ID {job_id}: {e}")
             job_details["job_title"] = None
 
         # --- Extract Seniority Level ---
@@ -757,7 +1434,7 @@ def _fetch_linkedin_job_details(job_id: str) -> dict | None:
                         job_details["level"] = level_text.text.strip()
                         break 
         except Exception as e: 
-            print(f"Error extracting seniority level for job ID {job_id}: {e}")
+            logging.debug(f"Error extracting seniority level for job ID {job_id}: {e}")
             job_details["level"] = None
 
         # --- Extract Location ---
@@ -776,9 +1453,9 @@ def _fetch_linkedin_job_details(job_id: str) -> dict | None:
 
             if not job_details.get("location"): 
                  job_details["location"] = None
-                 print(f"Warning: Could not extract location for job ID {job_id}")
+                 logging.debug(f"Could not extract location for job ID {job_id}")
         except Exception as e:
-            print(f"Error extracting location for job ID {job_id}: {e}")
+            logging.debug(f"Error extracting location for job ID {job_id}: {e}")
             job_details["location"] = None
 
         # --- Extract Description ---
@@ -788,7 +1465,7 @@ def _fetch_linkedin_job_details(job_id: str) -> dict | None:
             if description_div:
                 description_html = str(description_div)
             else:
-                logging.warning(f"Could not find description div for job ID {job_id}")
+                logging.debug(f"Could not find description div for job ID {job_id}")
         except Exception as e:
                 logging.error(f"Error extracting description HTML for job ID {job_id}: {e}")
                 description_html = ""
@@ -797,7 +1474,7 @@ def _fetch_linkedin_job_details(job_id: str) -> dict | None:
             job_details["description"] = convert_html_to_markdown(description_html)
         else:
             job_details["description"] = None 
-            logging.warning(f"Description HTML was empty for job ID {job_id}. Skipping conversion.") 
+            logging.debug(f"Description HTML was empty for job ID {job_id}. Skipping conversion.") 
 
         # --- Set Provider ---
         job_details["provider"] = "linkedin"
@@ -817,8 +1494,8 @@ def process_linkedin_query(
     enforce_location_filter: bool = True,
     already_seen_job_ids: set[str] | None = None,
     existing_job_ids: set[str] | None = None,
-    existing_company_title_keys: set[tuple[str, str]] | None = None,
-    already_seen_company_title_keys: set[tuple[str, str]] | None = None,
+    existing_match_keys: set[str] | None = None,
+    already_seen_match_keys: set[str] | None = None,
 ) -> list:
     """
     Orchestrates scraping and detail fetching for a single query,
@@ -836,14 +1513,15 @@ def process_linkedin_query(
 
 
     logging.info("\n--- Starting Filtering Step: Checking against Supabase ---")
-    if existing_job_ids is None or existing_company_title_keys is None:
-        job_ids_set, company_title_set = supabase_utils.get_existing_jobs_from_supabase()
+    if existing_job_ids is None or existing_match_keys is None:
+        job_ids_set, existing_rows = supabase_utils.get_existing_job_match_data_from_supabase()
+        match_keys_set = _collect_job_match_keys(existing_rows)
     else:
         job_ids_set = existing_job_ids
-        company_title_set = existing_company_title_keys
+        match_keys_set = existing_match_keys
     seen_ids = already_seen_job_ids if already_seen_job_ids is not None else set()
-    seen_company_title_keys = (
-        already_seen_company_title_keys if already_seen_company_title_keys is not None else set()
+    seen_match_keys = (
+        already_seen_match_keys if already_seen_match_keys is not None else set()
     )
     candidate_cards = []
     for card in scraped_job_cards:
@@ -853,13 +1531,9 @@ def process_linkedin_query(
         if jid in job_ids_set or jid in seen_ids:
             continue
 
-        normalized_company = _normalize_text(card.get("company"))
-        normalized_title = _normalize_text(card.get("job_title"))
-        company_title_key = None
-        if normalized_company and normalized_title:
-            company_title_key = (normalized_company, normalized_title)
-            if company_title_key in company_title_set or company_title_key in seen_company_title_keys:
-                continue
+        card_match_keys = _build_job_match_keys(card)
+        if card_match_keys and (card_match_keys & match_keys_set or card_match_keys & seen_match_keys):
+            continue
         candidate_cards.append(card)
 
     logging.info(f"Found {len(job_ids_set)} existing IDs in Supabase.")
@@ -872,12 +1546,23 @@ def process_linkedin_query(
 
     # Fast local title prefilter before expensive detail fetch.
     if getattr(config, "LINKEDIN_PREFILTER_BY_TITLE_BEFORE_DETAILS", True):
-        local_filtered = [c for c in candidate_cards if _is_linkedin_role_allowed(c.get("job_title"), None)]
+        min_card_fit_score = int(getattr(config, "LINKEDIN_MIN_CARD_FIT_SCORE", 0))
+        local_filtered = []
+        for card in candidate_cards:
+            if not _is_linkedin_role_allowed(card.get("job_title"), None):
+                continue
+            fit_score = _local_job_fit_score(card)
+            if fit_score < min_card_fit_score:
+                continue
+            scored_card = dict(card)
+            scored_card["local_fit_score"] = fit_score
+            local_filtered.append(scored_card)
+        local_filtered.sort(key=lambda item: int(item.get("local_fit_score") or 0), reverse=True)
         logging.info(
-            f"Local title prefilter kept {len(local_filtered)}/{len(candidate_cards)} candidates."
+            f"Local title prefilter kept {len(local_filtered)}/{len(candidate_cards)} candidates "
+            f"with score >= {min_card_fit_score}."
         )
-        if local_filtered:
-            candidate_cards = local_filtered
+        candidate_cards = local_filtered
 
     # Optional LLM prefilter/ranking pass on candidate titles.
     if getattr(config, "LINKEDIN_ENABLE_LLM_TITLE_PREFILTER", False):
@@ -911,14 +1596,6 @@ def process_linkedin_query(
 
     # Mark selected IDs as seen so other queries/cities in the same run don't refetch them.
     seen_ids.update(new_job_ids_to_process)
-    for card in candidate_cards:
-        jid = str(card.get("job_id") or "").strip()
-        if jid not in new_job_ids_to_process:
-            continue
-        normalized_company = _normalize_text(card.get("company"))
-        normalized_title = _normalize_text(card.get("job_title"))
-        if normalized_company and normalized_title:
-            seen_company_title_keys.add((normalized_company, normalized_title))
 
     logging.info(f"\n--- Starting Phase 2: Fetching Job Details for {len(new_job_ids_to_process)} New IDs ---")
     detailed_new_jobs = []
@@ -931,13 +1608,13 @@ def process_linkedin_query(
         if details:
             location = details.get("location")
             if enforce_location_filter and not _is_linkedin_location_allowed(location):
-                logging.info(f"Skipping job ID {job_id} due to strict city filter. Location: {location}")
+                logging.debug(f"Skipping job ID {job_id} due to strict city filter. Location: {location}")
                 continue
 
             job_title = details.get("job_title")
             job_level = details.get("level")
             if not _is_linkedin_role_allowed(job_title, job_level):
-                logging.info(
+                logging.debug(
                     f"Skipping job ID {job_id} due to role filter. "
                     f"Title: {job_title}, Level: {job_level}"
                 )
@@ -945,22 +1622,145 @@ def process_linkedin_query(
 
             description = details.get('description')
             if description and description.strip(): 
+                if not _passes_experience_requirement(description):
+                    experience_limit = int(
+                        getattr(
+                            config,
+                            "LINKEDIN_MAX_ALLOWED_MIN_EXPERIENCE_YEARS",
+                            getattr(config, "LINKEDIN_MAX_ALLOWED_EXPERIENCE_YEARS", 0),
+                        )
+                        or 0
+                    )
+                    logging.debug(
+                        "Skipping job ID %s due to experience requirement above %s years.",
+                        job_id,
+                        experience_limit,
+                    )
+                    continue
+                fit_score = _local_job_fit_score(details)
+                min_detail_fit_score = int(getattr(config, "LINKEDIN_MIN_DETAIL_FIT_SCORE", 0))
+                if fit_score < min_detail_fit_score:
+                    logging.debug(
+                        "Skipping job ID %s due to local fit score %s < %s.",
+                        job_id,
+                        fit_score,
+                        min_detail_fit_score,
+                    )
+                    continue
+                details["local_fit_score"] = fit_score
                 if 'job_id' in details and details['job_id'] is not None:
                     detailed_new_jobs.append(details)
+                    seen_match_keys.update(_build_job_match_keys(details))
                     processed_count += 1
                 else:
                     
-                    logging.warning(f"Fetched details for {job_id} but missing 'job_id' key. Skipping.")
+                    logging.debug(f"Fetched details for {job_id} but missing 'job_id' key. Skipping.")
             else:
                 
-                logging.warning(f"Skipping job ID {job_id} due to missing or empty description.") 
+                logging.debug(f"Skipping job ID {job_id} due to missing or empty description.") 
         else:
             
-            logging.warning(f"Skipping job ID {job_id} as detail fetching failed or returned no data.") 
+            logging.debug(f"Skipping job ID {job_id} as detail fetching failed or returned no data.") 
 
 
     logging.info(f"--- Finished Phase 2: Successfully fetched details for {processed_count} new job(s) ---")
     return detailed_new_jobs
+
+
+def process_naukri_query(
+    search_query: str,
+    location: str,
+    limit: int = None,
+    already_seen_job_ids: set[str] | None = None,
+    existing_job_ids: set[str] | None = None,
+    existing_match_keys: set[str] | None = None,
+    already_seen_match_keys: set[str] | None = None,
+) -> list[dict]:
+    scraped_results = _fetch_naukri_search_results(search_query, location)
+    if not scraped_results:
+        logging.info("No Naukri job cards found for query '%s' in '%s'.", search_query, location)
+        return []
+
+    logging.info("Naukri returned %s raw jobs before filtering.", len(scraped_results))
+
+    if existing_job_ids is None or existing_match_keys is None:
+        job_ids_set, existing_rows = supabase_utils.get_existing_job_match_data_from_supabase()
+        match_keys_set = _collect_job_match_keys(existing_rows)
+    else:
+        job_ids_set = existing_job_ids
+        match_keys_set = existing_match_keys
+
+    seen_ids = already_seen_job_ids if already_seen_job_ids is not None else set()
+    seen_match_keys = already_seen_match_keys if already_seen_match_keys is not None else set()
+
+    candidate_cards: list[dict] = []
+    for result in scraped_results:
+        candidate_stub = _build_naukri_candidate_stub(result, fallback_location=location)
+        if not candidate_stub:
+            continue
+
+        job_id = str(candidate_stub.get("job_id") or "").strip()
+        if not job_id or job_id in job_ids_set or job_id in seen_ids:
+            continue
+
+        candidate_match_keys = _build_job_match_keys(candidate_stub)
+        if candidate_match_keys and (candidate_match_keys & match_keys_set or candidate_match_keys & seen_match_keys):
+            continue
+
+        candidate_cards.append(candidate_stub)
+
+    logging.info("Naukri kept %s new jobs before prefilter scoring.", len(candidate_cards))
+    if not candidate_cards:
+        return []
+
+    min_card_fit_score = int(getattr(config, "LINKEDIN_MIN_CARD_FIT_SCORE", 0))
+    filtered_cards: list[dict] = []
+    for card in candidate_cards:
+        if not _is_linkedin_role_allowed(card.get("job_title"), card.get("level")):
+            continue
+        if not _passes_experience_requirement(card.get("description")):
+            continue
+        fit_score = _local_job_fit_score(card)
+        if fit_score < min_card_fit_score:
+            continue
+        scored_card = dict(card)
+        scored_card["local_fit_score"] = fit_score
+        filtered_cards.append(scored_card)
+
+    filtered_cards.sort(key=lambda item: _job_rank_tuple(item), reverse=True)
+    if limit is not None and len(filtered_cards) > limit:
+        filtered_cards = filtered_cards[:limit]
+
+    selected_ids = {str(card.get("job_id") or "").strip() for card in filtered_cards if card.get("job_id")}
+    seen_ids.update(selected_ids)
+
+    detailed_jobs: list[dict] = []
+    min_detail_fit_score = int(getattr(config, "LINKEDIN_MIN_DETAIL_FIT_SCORE", 0))
+
+    for card in filtered_cards:
+        details = _fetch_naukri_job_details(card.get("job_id"), search_query=search_query, location=location)
+        if not details:
+            continue
+        if not _is_linkedin_role_allowed(details.get("job_title"), details.get("level")):
+            continue
+        if not _passes_experience_requirement(details.get("description")):
+            continue
+
+        fit_score = _local_job_fit_score(details)
+        if fit_score < min_detail_fit_score:
+            continue
+
+        details["local_fit_score"] = fit_score
+        detailed_jobs.append(details)
+        seen_match_keys.update(_build_job_match_keys(details))
+
+    logging.info(
+        "Finished Naukri query '%s' in '%s' with %s surviving detailed jobs.",
+        search_query,
+        location,
+        len(detailed_jobs),
+    )
+    return detailed_jobs
 
 def _fetch_careers_future_jobs(search_query: str) -> list:
     """
@@ -1152,7 +1952,13 @@ def _fetch_careers_future_job_details(job_id: str) -> dict | None:
     
     return None # Return None in case of any error
 
-def process_careers_future_query(search_query: str, limit: int = None) -> list:
+def process_careers_future_query(
+    search_query: str,
+    limit: int = None,
+    existing_job_ids: set[str] | None = None,
+    existing_match_keys: set[str] | None = None,
+    already_seen_match_keys: set[str] | None = None,
+) -> list:
     """
     Fetch jobs from CareersFuture and return them as a list of dictionaries.
     """
@@ -1165,13 +1971,23 @@ def process_careers_future_query(search_query: str, limit: int = None) -> list:
     # 2. Fetch existing job identifiers from Supabase
     logging.info("Phase 2: Fetching existing job identifiers from Supabase...")
     try:
-        job_ids_set_supabase, company_title_set_supabase = supabase_utils.get_existing_jobs_from_supabase()
-        logging.info(f"Phase 2: Supabase returned {len(job_ids_set_supabase)} existing IDs and {len(company_title_set_supabase)} company/title pairs.")
+        if existing_job_ids is None or existing_match_keys is None:
+            job_ids_set_supabase, existing_rows = supabase_utils.get_existing_job_match_data_from_supabase()
+            match_keys_set_supabase = _collect_job_match_keys(existing_rows)
+        else:
+            job_ids_set_supabase = existing_job_ids
+            match_keys_set_supabase = existing_match_keys
+        logging.info(
+            "Phase 2: Supabase returned %s existing IDs and %s duplicate-match keys.",
+            len(job_ids_set_supabase),
+            len(match_keys_set_supabase),
+        )
     except Exception as e:
         logging.error(f"Failed to fetch existing jobs from Supabase: {e}")
         logging.warning("Proceeding without Supabase data; all fetched jobs will be considered new.")
         job_ids_set_supabase = set()
-        company_title_set_supabase = set()
+        match_keys_set_supabase = set()
+    seen_match_keys = already_seen_match_keys if already_seen_match_keys is not None else set()
 
     # 3. Filter the fetched jobs
     logging.info("Phase 3: Filtering fetched jobs against Supabase data...")
@@ -1193,30 +2009,29 @@ def process_careers_future_query(search_query: str, limit: int = None) -> list:
             continue # Skip this job
 
         # Prepare for Check 2: Company & Title combination
-        company_name = _get_careers_future_job_company_name(job_item)
-        job_title = job_item.get('title')
+        candidate_stub = {
+            "job_id": job_uuid,
+            "provider": "careers_future",
+            "company": _get_careers_future_job_company_name(job_item),
+            "job_title": job_item.get("title"),
+            "location": "Singapore",
+        }
+        if not _is_linkedin_role_allowed(candidate_stub.get("job_title"), None):
+            continue
 
-        normalized_company = None
-        normalized_title = None
-
-        if company_name:
-            normalized_company = company_name.strip().lower()
-        if job_title:
-            normalized_title = job_title.strip().lower()
-        
-        if normalized_company and normalized_title:
-            company_title_key = (normalized_company, normalized_title)
-            if company_title_key in company_title_set_supabase:
-                logging.debug(f"Skipping job (Company/Title combo exists in Supabase): UUID='{job_uuid}', Company='{normalized_company}', Title='{normalized_title}'")
-                skipped_by_combo_count +=1
-                continue 
-        elif job_uuid: 
-            logging.debug(f"Job UUID='{job_uuid}' has no company/title for combo check. Will be added if ID is new.")
-        else: 
-             logging.warning(f"Job item has no UUID and insufficient company/title for matching: {str(job_item)[:100]}")
+        candidate_match_keys = _build_job_match_keys(candidate_stub)
+        if candidate_match_keys and (candidate_match_keys & match_keys_set_supabase or candidate_match_keys & seen_match_keys):
+            logging.debug(
+                "Skipping job (duplicate match key exists): UUID='%s', Title='%s'",
+                job_uuid,
+                job_item.get("title", "N/A"),
+            )
+            skipped_by_combo_count += 1
+            continue
 
 
         new_job_ids_to_process.append(job_uuid) 
+        seen_match_keys.update(candidate_match_keys)
 
     # 4. Fetch details ONLY for the genuinely new job IDs
     if limit is not None and len(new_job_ids_to_process) > limit:
@@ -1233,8 +2048,18 @@ def process_careers_future_query(search_query: str, limit: int = None) -> list:
             # --- NEW: Check for description before adding ---
             description = details.get('description')
             if description and description.strip(): # Ensure it's not None or an empty/whitespace string
+                if not _is_linkedin_role_allowed(details.get("job_title"), details.get("level")):
+                    continue
+                if not _passes_experience_requirement(description):
+                    continue
+                fit_score = _local_job_fit_score(details)
+                min_detail_fit_score = int(getattr(config, "LINKEDIN_MIN_DETAIL_FIT_SCORE", 0))
+                if fit_score < min_detail_fit_score:
+                    continue
+                details["local_fit_score"] = fit_score
                 if 'job_id' in details and details['job_id'] is not None:
                     detailed_new_jobs.append(details)
+                    seen_match_keys.update(_build_job_match_keys(details))
                     processed_count += 1
                 else:
                     
@@ -1257,7 +2082,7 @@ def _run_linkedin_queries_for_location(
     max_jobs_per_search: int,
     max_jobs_remaining: int,
     seen_job_ids: set[str] | None = None,
-    seen_company_title_keys: set[tuple[str, str]] | None = None,
+    seen_match_keys: set[str] | None = None,
     expanded_search_queries: list[str] | None = None,
     min_target_before_next_city: int = 0,
 ) -> int:
@@ -1268,10 +2093,11 @@ def _run_linkedin_queries_for_location(
     if max_jobs_remaining <= 0:
         return 0
 
-    existing_ids_for_run, existing_company_title_keys_for_run = supabase_utils.get_existing_jobs_from_supabase()
+    existing_ids_for_run, existing_rows_for_run = supabase_utils.get_existing_job_match_data_from_supabase()
+    existing_match_keys_for_run = _collect_job_match_keys(existing_rows_for_run)
     logging.info(
         f"Loaded {len(existing_ids_for_run)} existing job IDs and "
-        f"{len(existing_company_title_keys_for_run)} company/title keys once for this location run."
+        f"{len(existing_match_keys_for_run)} duplicate-match keys once for this location run."
     )
 
     fetched_for_location: list[dict] = []
@@ -1296,8 +2122,8 @@ def _run_linkedin_queries_for_location(
                 enforce_location_filter=True,
                 already_seen_job_ids=seen_job_ids,
                 existing_job_ids=existing_ids_for_run,
-                existing_company_title_keys=existing_company_title_keys_for_run,
-                already_seen_company_title_keys=seen_company_title_keys,
+                existing_match_keys=existing_match_keys_for_run,
+                already_seen_match_keys=seen_match_keys,
             )
 
             if new_linkedin_job_details:
@@ -1336,13 +2162,13 @@ def _run_linkedin_queries_for_location(
     if not fetched_for_location:
         return 0
 
-    # Dedupe by job_id across all query pools
+    # Dedupe by identity across all query pools
     by_job_id = {}
     for job in fetched_for_location:
         jid = str(job.get("job_id") or "").strip()
         if jid and jid not in by_job_id:
             by_job_id[jid] = job
-    pool = list(by_job_id.values())
+    pool = _dedupe_jobs_by_match_keys(list(by_job_id.values()))
     logging.info(f"Built final candidate pool for location '{location}': {len(pool)} unique jobs.")
 
     max_per_company = int(getattr(config, "LINKEDIN_MAX_JOBS_PER_COMPANY_PER_RUN", 1))
@@ -1376,97 +2202,342 @@ def _run_linkedin_queries_for_location(
             f"Saving final shortlisted jobs for '{location}': {len(final_jobs)} "
             f"(max per company: {max_per_company})."
         )
-        supabase_utils.save_jobs_to_supabase(final_jobs)
-        return len(final_jobs)
+        saved_count = supabase_utils.save_jobs_to_supabase(final_jobs)
+        if saved_count != len(final_jobs):
+            logging.warning(
+                "Only %s/%s shortlisted jobs were saved for '%s'.",
+                saved_count,
+                len(final_jobs),
+                location,
+            )
+        return saved_count
 
     return 0
 
-# --- Main Execution ---
-if __name__ == "__main__":
 
-    total_new_jobs_saved = 0
+def _collect_candidates_for_location(
+    source_name: str,
+    search_queries: list[str],
+    location: str,
+    max_jobs_per_search: int,
+    candidate_limit: int,
+    query_processor,
+    seen_job_ids: set[str] | None,
+    existing_job_ids: set[str],
+    existing_match_keys: set[str],
+    seen_match_keys: set[str],
+    expanded_search_queries: list[str] | None = None,
+    min_target_before_next_city: int = 0,
+    extra_query_kwargs: dict | None = None,
+) -> list[dict]:
+    if candidate_limit <= 0:
+        return []
 
-    # Get jobs from LinkedIn
-    if "linkedin" in config.SCRAPING_SOURCES:
-        logging.info("\n--- Starting LinkedIn Job Scraping ---")
-        seen_linkedin_job_ids_in_run: set[str] = set()
-        seen_linkedin_company_titles_in_run: set[tuple[str, str]] = set()
-        max_jobs_per_search = config.MAX_JOBS_PER_SEARCH.get("linkedin", getattr(config, 'DEFAULT_MAX_JOBS_PER_SEARCH', 10))
-        linkedin_locations = getattr(config, "LINKEDIN_LOCATIONS", None) or [config.LINKEDIN_LOCATION]
-        max_jobs_per_run = getattr(config, "LINKEDIN_MAX_NEW_JOBS_PER_RUN", 0)
-        if max_jobs_per_run <= 0:
-            max_jobs_per_run = 999999
+    extra_query_kwargs = dict(extra_query_kwargs or {})
+    fetched_for_location: list[dict] = []
 
-        primary_location = linkedin_locations[0]
-        secondary_locations = linkedin_locations[1:]
-        expanded_search_queries = getattr(config, "LINKEDIN_EXPANDED_SEARCH_QUERIES", None) or []
-        min_target_before_next_city = int(
-            getattr(config, "LINKEDIN_MIN_TARGET_JOBS_BEFORE_NEXT_CITY", max_jobs_per_run)
+    def _run_query_batch(query_batch: list[str], batch_label: str) -> None:
+        for query in query_batch:
+            remaining_candidates = candidate_limit - len(fetched_for_location)
+            if remaining_candidates <= 0:
+                break
+
+            per_query_limit = min(max_jobs_per_search, remaining_candidates)
+            logging.info(
+                "%s | %s | location=%s | remaining candidate slots=%s",
+                source_name.upper(),
+                query,
+                location,
+                remaining_candidates,
+            )
+            query_kwargs = {
+                "limit": per_query_limit,
+                "already_seen_job_ids": seen_job_ids,
+                "existing_job_ids": existing_job_ids,
+                "existing_match_keys": existing_match_keys,
+                "already_seen_match_keys": seen_match_keys,
+            }
+            query_kwargs.update(extra_query_kwargs)
+
+            new_job_details = query_processor(query, location, **query_kwargs)
+            if new_job_details:
+                fetched_for_location.extend(new_job_details)
+                logging.info(
+                    "%s %s kept %s jobs for '%s' (pool size %s/%s).",
+                    source_name.upper(),
+                    batch_label,
+                    len(new_job_details),
+                    query,
+                    len(fetched_for_location),
+                    candidate_limit,
+                )
+            else:
+                logging.info(
+                    "%s %s yielded no surviving jobs for '%s' in '%s'.",
+                    source_name.upper(),
+                    batch_label,
+                    query,
+                    location,
+                )
+
+    _run_query_batch(search_queries, "primary query batch")
+
+    should_expand_queries = (
+        bool(expanded_search_queries)
+        and len(fetched_for_location) < max(
+            1,
+            int(
+                getattr(
+                    config,
+                    "LINKEDIN_QUERY_EXPANSION_MIN_CANDIDATES",
+                    min_target_before_next_city,
+                )
+            ),
         )
+        and len(fetched_for_location) < candidate_limit
+    )
+    if should_expand_queries:
+        logging.info(
+            "%s location '%s' produced %s candidates after primary queries; running expanded queries.",
+            source_name.upper(),
+            location,
+            len(fetched_for_location),
+        )
+        _run_query_batch(expanded_search_queries, "expanded query batch")
 
-        logging.info(f"Primary city: {primary_location}")
-        primary_saved = _run_linkedin_queries_for_location(
-            search_queries=config.LINKEDIN_SEARCH_QUERIES,
+    return _rank_and_limit_candidates(fetched_for_location, candidate_limit)
+
+
+def _collect_multilocation_source_candidates(
+    source_name: str,
+    locations: list[str],
+    search_queries: list[str],
+    expanded_search_queries: list[str] | None,
+    max_jobs_per_search: int,
+    candidate_limit: int,
+    query_processor,
+    seen_job_ids: set[str] | None,
+    existing_job_ids: set[str],
+    existing_match_keys: set[str],
+    seen_match_keys: set[str],
+    extra_query_kwargs: dict | None = None,
+) -> list[dict]:
+    if candidate_limit <= 0:
+        return []
+
+    collected: list[dict] = []
+    if not locations:
+        return collected
+
+    location_target_before_next = min(
+        candidate_limit,
+        int(
+            getattr(
+                config,
+                "LINKEDIN_MIN_TARGET_JOBS_BEFORE_NEXT_CITY",
+                candidate_limit,
+            )
+        ),
+    )
+
+    primary_location = locations[0]
+    secondary_locations = locations[1:]
+    collected.extend(
+        _collect_candidates_for_location(
+            source_name=source_name,
+            search_queries=search_queries,
             location=primary_location,
             max_jobs_per_search=max_jobs_per_search,
-            max_jobs_remaining=max_jobs_per_run - total_new_jobs_saved,
-            seen_job_ids=seen_linkedin_job_ids_in_run,
-            seen_company_title_keys=seen_linkedin_company_titles_in_run,
+            candidate_limit=candidate_limit,
+            query_processor=query_processor,
+            seen_job_ids=seen_job_ids,
+            existing_job_ids=existing_job_ids,
+            existing_match_keys=existing_match_keys,
+            seen_match_keys=seen_match_keys,
             expanded_search_queries=expanded_search_queries,
-            min_target_before_next_city=min_target_before_next_city,
+            min_target_before_next_city=location_target_before_next,
+            extra_query_kwargs=extra_query_kwargs,
         )
-        total_new_jobs_saved += primary_saved
+    )
+    collected = _rank_and_limit_candidates(collected, candidate_limit)
 
-        enable_secondary = getattr(config, "LINKEDIN_ENABLE_SECONDARY_CITY_FALLBACK", True)
-        should_run_secondary = (
-            enable_secondary
-            and secondary_locations
-            and total_new_jobs_saved < min_target_before_next_city
-            and total_new_jobs_saved < max_jobs_per_run
+    should_run_secondary = (
+        bool(getattr(config, "LINKEDIN_ENABLE_SECONDARY_CITY_FALLBACK", True))
+        and secondary_locations
+        and len(collected) < location_target_before_next
+        and len(collected) < candidate_limit
+    )
+    if should_run_secondary:
+        logging.info(
+            "%s primary location '%s' produced %s candidates (< target %s). Running fallback locations.",
+            source_name.upper(),
+            primary_location,
+            len(collected),
+            location_target_before_next,
         )
 
-        if should_run_secondary:
-            logging.info(
-                f"Primary city saved {primary_saved} jobs (< target {min_target_before_next_city}). "
-                f"Running fallback city/cities: {secondary_locations}"
+        for fallback_location in secondary_locations:
+            remaining_capacity = candidate_limit - len(collected)
+            if remaining_capacity <= 0:
+                break
+
+            fallback_candidates = _collect_candidates_for_location(
+                source_name=source_name,
+                search_queries=search_queries,
+                location=fallback_location,
+                max_jobs_per_search=max_jobs_per_search,
+                candidate_limit=remaining_capacity,
+                query_processor=query_processor,
+                seen_job_ids=seen_job_ids,
+                existing_job_ids=existing_job_ids,
+                existing_match_keys=existing_match_keys,
+                seen_match_keys=seen_match_keys,
+                expanded_search_queries=expanded_search_queries,
+                min_target_before_next_city=max(1, location_target_before_next - len(collected)),
+                extra_query_kwargs=extra_query_kwargs,
             )
-            for fallback_location in secondary_locations:
-                if total_new_jobs_saved >= max_jobs_per_run:
-                    break
-                fallback_saved = _run_linkedin_queries_for_location(
-                    search_queries=config.LINKEDIN_SEARCH_QUERIES,
-                    location=fallback_location,
-                    max_jobs_per_search=max_jobs_per_search,
-                    max_jobs_remaining=max_jobs_per_run - total_new_jobs_saved,
-                    seen_job_ids=seen_linkedin_job_ids_in_run,
-                    seen_company_title_keys=seen_linkedin_company_titles_in_run,
-                    expanded_search_queries=expanded_search_queries,
-                    min_target_before_next_city=min_target_before_next_city - total_new_jobs_saved,
-                )
-                total_new_jobs_saved += fallback_saved
+            if fallback_candidates:
+                collected.extend(fallback_candidates)
+                collected = _rank_and_limit_candidates(collected, candidate_limit)
+
+    return collected
+
+
+def process_indeed_india_query(
+    search_query: str,
+    location: str,
+    limit: int = None,
+    already_seen_job_ids: set[str] | None = None,
+    existing_job_ids: set[str] | None = None,
+    existing_match_keys: set[str] | None = None,
+    already_seen_match_keys: set[str] | None = None,
+) -> list[dict]:
+    _ = (
+        search_query,
+        location,
+        limit,
+        already_seen_job_ids,
+        existing_job_ids,
+        existing_match_keys,
+        already_seen_match_keys,
+    )
+    logging.warning(
+        "Indeed India scraping is configured, but direct requests are currently blocked by Indeed's security checks from this environment. Skipping Indeed for this run."
+    )
+    return []
+
+
+def _log_source_pool(source_name: str, jobs: list[dict]) -> None:
+    provider_counts: dict[str, int] = {}
+    for job in jobs:
+        provider = _normalize_text(job.get("provider")) or source_name
+        provider_counts[provider] = provider_counts.get(provider, 0) + 1
+    logging.info("%s candidate pool size: %s | breakdown=%s", source_name.upper(), len(jobs), provider_counts)
+
+# --- Main Execution ---
+if __name__ == "__main__":
+    total_new_jobs_saved = 0
+    all_candidates: list[dict] = []
+    seen_job_match_keys_in_run: set[str] = set()
+
+    existing_job_ids, existing_rows = supabase_utils.get_existing_job_match_data_from_supabase()
+    existing_match_keys = _collect_job_match_keys(existing_rows)
+
+    source_candidate_caps = getattr(config, "SCRAPER_SOURCE_CANDIDATE_LIMITS", None) or {}
+    source_final_caps = getattr(config, "SCRAPER_SOURCE_FINAL_CAPS", None) or {}
+    target_saved_jobs = int(getattr(config, "TARGET_SAVED_JOBS_PER_RUN", 0) or 0)
+    max_per_company = max(1, int(getattr(config, "LINKEDIN_MAX_JOBS_PER_COMPANY_PER_RUN", 3)))
+
+    if "linkedin" in config.SCRAPING_SOURCES:
+        logging.info("\n--- Starting LinkedIn Job Scraping ---")
+        linkedin_seen_ids: set[str] = set()
+        linkedin_candidates = _collect_multilocation_source_candidates(
+            source_name="linkedin",
+            locations=getattr(config, "LINKEDIN_LOCATIONS", None) or [config.LINKEDIN_LOCATION],
+            search_queries=getattr(config, "LINKEDIN_SEARCH_QUERIES", None) or [],
+            expanded_search_queries=getattr(config, "LINKEDIN_EXPANDED_SEARCH_QUERIES", None) or [],
+            max_jobs_per_search=config.MAX_JOBS_PER_SEARCH.get("linkedin", getattr(config, "DEFAULT_MAX_JOBS_PER_SEARCH", 10)),
+            candidate_limit=int(source_candidate_caps.get("linkedin", 0) or 0),
+            query_processor=process_linkedin_query,
+            seen_job_ids=linkedin_seen_ids,
+            existing_job_ids=existing_job_ids,
+            existing_match_keys=existing_match_keys,
+            seen_match_keys=seen_job_match_keys_in_run,
+            extra_query_kwargs={
+                "geo_id_override": USE_CONFIG_GEO_ID,
+                "enforce_location_filter": True,
+            },
+        )
+        all_candidates.extend(linkedin_candidates)
+        _log_source_pool("linkedin", linkedin_candidates)
     else:
         logging.info("\n--- Skipping LinkedIn Job Scraping per config ---")
 
-    # Get jobs from Careers Future
-    if "careers_future" in config.SCRAPING_SOURCES:
-        logging.info(f"\n--- Starting Careers Future Job Scraping ---")
-        max_jobs_per_search = config.MAX_JOBS_PER_SEARCH.get("careers_future", getattr(config, 'DEFAULT_MAX_JOBS_PER_SEARCH', 10))
-        for query in config.CAREERS_FUTURE_SEARCH_QUERIES:
-            logging.info(f"\n{'='*20} Processing Careers Future Search Query: '{query}' {'='*20}")
-
-            # 1. Process the query: Scrape IDs, filter, fetch new details
-            new_careers_future_job_details = process_careers_future_query(query, limit=max_jobs_per_search)
-
-            # 2. Save the NEW scraped data to Supabase
-            if new_careers_future_job_details:
-                logging.info(f"\n--- Saving {len(new_careers_future_job_details)} new job(s) for query '{query}' ---")
-                supabase_utils.save_jobs_to_supabase(new_careers_future_job_details)
-                total_new_jobs_saved += len(new_careers_future_job_details)
-            else:
-                logging.info(f"\nNo new job details were fetched or processed for query '{query}'.")
+    if "naukri" in config.SCRAPING_SOURCES:
+        logging.info("\n--- Starting Naukri Job Scraping ---")
+        naukri_seen_ids: set[str] = set()
+        naukri_candidates = _collect_multilocation_source_candidates(
+            source_name="naukri",
+            locations=getattr(config, "NAUKRI_LOCATIONS", None) or getattr(config, "LINKEDIN_LOCATIONS", None) or [config.LINKEDIN_LOCATION],
+            search_queries=getattr(config, "NAUKRI_SEARCH_QUERIES", None) or getattr(config, "LINKEDIN_SEARCH_QUERIES", None) or [],
+            expanded_search_queries=getattr(config, "NAUKRI_EXPANDED_SEARCH_QUERIES", None) or [],
+            max_jobs_per_search=config.MAX_JOBS_PER_SEARCH.get("naukri", getattr(config, "DEFAULT_MAX_JOBS_PER_SEARCH", 10)),
+            candidate_limit=int(source_candidate_caps.get("naukri", 0) or 0),
+            query_processor=process_naukri_query,
+            seen_job_ids=naukri_seen_ids,
+            existing_job_ids=existing_job_ids,
+            existing_match_keys=existing_match_keys,
+            seen_match_keys=seen_job_match_keys_in_run,
+        )
+        all_candidates.extend(naukri_candidates)
+        _log_source_pool("naukri", naukri_candidates)
     else:
-        logging.info("\n--- Skipping Careers Future Job Scraping per config ---")
+        logging.info("\n--- Skipping Naukri Job Scraping per config ---")
 
-    # --- End of Script ---      
+    if "indeed_india" in config.SCRAPING_SOURCES:
+        logging.info("\n--- Starting Indeed India Job Scraping ---")
+        indeed_seen_ids: set[str] = set()
+        indeed_candidates = _collect_multilocation_source_candidates(
+            source_name="indeed_india",
+            locations=getattr(config, "INDEED_INDIA_LOCATIONS", None) or getattr(config, "LINKEDIN_LOCATIONS", None) or [config.LINKEDIN_LOCATION],
+            search_queries=getattr(config, "INDEED_INDIA_SEARCH_QUERIES", None) or getattr(config, "LINKEDIN_SEARCH_QUERIES", None) or [],
+            expanded_search_queries=[],
+            max_jobs_per_search=config.MAX_JOBS_PER_SEARCH.get("indeed_india", getattr(config, "DEFAULT_MAX_JOBS_PER_SEARCH", 10)),
+            candidate_limit=int(source_candidate_caps.get("indeed_india", 0) or 0),
+            query_processor=process_indeed_india_query,
+            seen_job_ids=indeed_seen_ids,
+            existing_job_ids=existing_job_ids,
+            existing_match_keys=existing_match_keys,
+            seen_match_keys=seen_job_match_keys_in_run,
+        )
+        all_candidates.extend(indeed_candidates)
+        _log_source_pool("indeed_india", indeed_candidates)
+    else:
+        logging.info("\n--- Skipping Indeed India Job Scraping per config ---")
+
+    final_jobs = _shortlist_with_source_quotas(
+        candidates=all_candidates,
+        target_count=target_saved_jobs,
+        max_per_company=max_per_company,
+        source_caps=source_final_caps,
+    )
+
+    if final_jobs:
+        logging.info(
+            "Saving %s final shortlisted jobs to Supabase (target=%s, max_per_company=%s).",
+            len(final_jobs),
+            target_saved_jobs,
+            max_per_company,
+        )
+        total_new_jobs_saved = supabase_utils.save_jobs_to_supabase(final_jobs)
+        if total_new_jobs_saved != len(final_jobs):
+            logging.warning(
+                "Only %s/%s shortlisted jobs were saved to Supabase.",
+                total_new_jobs_saved,
+                len(final_jobs),
+            )
+    else:
+        logging.info("No final shortlisted jobs survived the multi-source filtering pipeline.")
+
     logging.info(f"\n{'='*20} Job scraping script finished {'='*20}")
     logging.info(f"Total new jobs saved across all queries: {total_new_jobs_saved}")

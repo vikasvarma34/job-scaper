@@ -30,21 +30,25 @@ LLM_API_KEY = os.environ.get("LLM_API_KEY") or os.environ.get("GEMINI_API_KEY") 
 # Full list of supported models & naming: https://docs.litellm.ai/docs/providers
 LLM_MODEL = "openai/gpt-5.4"
 RESUME_GENERATION_FLOW = "legacy"  # Options: "legacy", "two_step_ai"
+TARGET_SAVED_JOBS_PER_RUN = 50
+SCRAPER_LOG_LEVEL = "INFO"  # Use "DEBUG" only when you want full request-by-request tracing.
 
 # --- Search Configuration ---
 LINKEDIN_SEARCH_QUERIES = [
-    "full stack engineer",
-    "software engineer",
-    "full stack developer",
-    "software developer",
-    "java full stack developer"
+    "java full stack developer",
+    "full stack developer java react",
+    "backend developer java spring boot",
+    "java backend developer",
+    "developer associate java",
+    "associate software engineer java",
 ]
 LINKEDIN_EXPANDED_SEARCH_QUERIES = [
-    "associate software engineer",
-    "software development engineer",
-    "application developer",
-    "java developer",
-    "backend developer",
+    "java software engineer",
+    "software engineer ii java",
+    "application developer java",
+    "associate java developer",
+    "full stack engineer java",
+    "backend engineer java microservices",
 ]
 LINKEDIN_LOCATION = "India"
 # Strict city mode: scraper will run searches per city in this list.
@@ -62,13 +66,14 @@ LINKEDIN_GEO_ID = None
 # 2) If Hyderabad still does not reach the target, try expanded Hyderabad queries.
 # 3) Only then move to Bangalore, then later cities if still needed.
 LINKEDIN_ENABLE_SECONDARY_CITY_FALLBACK = True
-# Final number of shortlisted jobs to save into Supabase for scoring.
-LINKEDIN_MAX_NEW_JOBS_PER_RUN = 100
+# Legacy LinkedIn-only target. Multi-source runs now use TARGET_SAVED_JOBS_PER_RUN
+# together with SCRAPER_SOURCE_FINAL_CAPS below.
+LINKEDIN_MAX_NEW_JOBS_PER_RUN = 18
 # Do not move to the next city until the current city has failed to reach this target.
 LINKEDIN_MIN_TARGET_JOBS_BEFORE_NEXT_CITY = LINKEDIN_MAX_NEW_JOBS_PER_RUN
 # If the initial query set for a city underperforms, try broader backup queries in the same city first.
 LINKEDIN_ENABLE_QUERY_EXPANSION_BEFORE_NEXT_CITY = True
-LINKEDIN_QUERY_EXPANSION_MIN_CANDIDATES = 100
+LINKEDIN_QUERY_EXPANSION_MIN_CANDIDATES = 14
 # Strict post-filter keywords for final job location validation.
 LINKEDIN_ALLOWED_CITY_KEYWORDS = [
     "hyderabad",
@@ -92,7 +97,6 @@ LINKEDIN_EXCLUDED_TITLE_KEYWORDS = [
     "frontend",
     "front-end",
     "front end",
-    "angular",
     "ui",
     "ux",
     "android",
@@ -105,9 +109,14 @@ LINKEDIN_EXCLUDED_TITLE_KEYWORDS = [
     "sre",
     "qa",
     "sdet",
+    "software engineer in test",
+    "verification",
+    "testing",
     "quality assurance",
     "test engineer",
     "automation engineer",
+    "analyst",
+    "consultant",
     "support engineer",
     "technical support",
     "application support",
@@ -125,6 +134,11 @@ LINKEDIN_EXCLUDED_TITLE_KEYWORDS = [
     "mainframe",
     "embedded",
     "firmware",
+    "d365",
+    "oracle apps",
+    "erp",
+    "product testing",
+    "walk in drive",
     "data scientist",
     "data engineer",
     "business analyst",
@@ -137,14 +151,20 @@ LINKEDIN_REQUIRED_TITLE_KEYWORDS = [
     "full stack",
     "fullstack",
     "full stack developer",
-    "software engineer",
-    "software developer",
     "java full stack",
     "java fullstack",
     "backend engineer",
     "backend developer",
+    "java backend",
     "java developer",
     "java engineer",
+    "java software engineer",
+    "associate software engineer",
+    "developer associate",
+    "associate java developer",
+    "application developer",
+    "software engineer ii",
+    "engineer ii",
     "sde",
 ]
 LINKEDIN_ENFORCE_REQUIRED_TITLE_KEYWORDS = False
@@ -160,6 +180,15 @@ LINKEDIN_JOB_POSTING_DATE = "r86400" # r86400=Past 24h, r604800=Past week
 LINKEDIN_F_WT = None # Set 1=Onsite, 2=Remote, 3=Hybrid, or None for all
 # Prefilter controls to reduce wasted detail-fetch calls.
 LINKEDIN_PREFILTER_BY_TITLE_BEFORE_DETAILS = True
+LINKEDIN_MIN_CARD_FIT_SCORE = 4
+LINKEDIN_MIN_DETAIL_FIT_SCORE = 7
+LINKEDIN_MIN_SHORTLIST_FIT_SCORE = 7
+# Reject only when the stated minimum required experience is above this value.
+# Examples allowed: 0+, 1+, 2+, 2-3, 2-4, 2-5, 3 years, 3+ years.
+# Examples rejected: 4 years, 4+ years, 5-7 years.
+LINKEDIN_MAX_ALLOWED_MIN_EXPERIENCE_YEARS = 3
+# Backward-compatible alias for older code paths.
+LINKEDIN_MAX_ALLOWED_EXPERIENCE_YEARS = LINKEDIN_MAX_ALLOWED_MIN_EXPERIENCE_YEARS
 # Use an LLM pass to rank broader LinkedIn card results before detail fetch.
 LINKEDIN_ENABLE_LLM_TITLE_PREFILTER = False
 LINKEDIN_LLM_PREFILTER_CANDIDATE_CAP = 180
@@ -171,12 +200,38 @@ LINKEDIN_STRICT_COMPANY_DIVERSITY = False
 LINKEDIN_ENABLE_LLM_FINAL_SHORTLIST = False
 LINKEDIN_LLM_FINAL_SHORTLIST_CANDIDATE_CAP = 240
 
+NAUKRI_SEARCH_QUERIES = LINKEDIN_SEARCH_QUERIES
+NAUKRI_EXPANDED_SEARCH_QUERIES = LINKEDIN_EXPANDED_SEARCH_QUERIES
+NAUKRI_LOCATIONS = LINKEDIN_LOCATIONS
+NAUKRI_RESULTS_PER_PAGE = 20
+NAUKRI_MAX_PAGES_PER_QUERY = 3
+NAUKRI_FRESHNESS_DAYS = 1
+
+INDEED_INDIA_SEARCH_QUERIES = LINKEDIN_SEARCH_QUERIES
+INDEED_INDIA_LOCATIONS = LINKEDIN_LOCATIONS
+
+SCRAPER_SOURCE_CANDIDATE_LIMITS = {
+    "linkedin": 28,
+    "naukri": 28,
+    "indeed_india": 20,
+}
+SCRAPER_SOURCE_FINAL_CAPS = {
+    "linkedin": 18,
+    "naukri": 18,
+    "indeed_india": 14,
+}
+SCRAPER_SOURCE_PRIORITY = {
+    "linkedin": 3,
+    "naukri": 3,
+    "indeed_india": 2,
+}
+
 CAREERS_FUTURE_SEARCH_QUERIES = ["IT Support", "Full Stack Web Developer", "Application Support", "Cybersecurity Analyst", "fresher developer"]
 CAREERS_FUTURE_SEARCH_CATEGORIES = ["Information Technology"]
 CAREERS_FUTURE_SEARCH_EMPLOYMENT_TYPES = ["Full Time"]
 
 # --- Processing Limits ---
-SCRAPING_SOURCES = ["linkedin"] # "linkedin", "careers_future"
+SCRAPING_SOURCES = ["linkedin", "naukri", "indeed_india"] # "linkedin", "naukri", "indeed_india", "careers_future"
 # Set 0 to score all unscored jobs currently in Supabase.
 JOBS_TO_SCORE_PER_RUN = 0
 JOBS_TO_CUSTOMIZE_PER_RUN = 20
@@ -186,7 +241,9 @@ MIN_SCORE_FOR_CUSTOM_RESUME = 85
 # Example: set to 20 for "top 20%" of currently eligible scored jobs.
 JOBS_TO_CUSTOMIZE_TOP_PERCENT = 0
 MAX_JOBS_PER_SEARCH = {
-    "linkedin": 60,
+    "linkedin": 12,
+    "naukri": 12,
+    "indeed_india": 10,
     "careers_future": 10,
 }
 
