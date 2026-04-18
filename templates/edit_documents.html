@@ -19,6 +19,10 @@
             {{ job.company or "Unknown Company" }}
           </p>
         </div>
+        <aside class="hero-note">
+          <p class="hero-note-label">Editing Tip</p>
+          <p class="hero-note-copy">Keep resume JSON valid before saving. The system regenerates and stores updated PDFs from your edited content.</p>
+        </aside>
       </section>
 
       <section class="panel">
@@ -37,10 +41,10 @@
         </div>
 
         {% if save_success %}
-          <p class="panel-copy" style="color: var(--success); font-weight: 700;">Manual edits saved successfully.</p>
+          <p class="alert success">Manual edits saved successfully.</p>
         {% endif %}
         {% if save_error %}
-          <p class="panel-copy" style="color: var(--danger); font-weight: 700;">{{ save_error }}</p>
+          <p class="alert danger">{{ save_error }}</p>
         {% endif %}
 
         <form method="post">
@@ -52,19 +56,19 @@
 
           <div class="job-runner">
             <label class="field-label" for="resume-json">Customized Resume JSON</label>
-            <textarea id="resume-json" name="resume_json" class="job-input" rows="28" style="min-height: 680px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;">{{ resume_json }}</textarea>
+            <textarea id="resume-json" name="resume_json" class="job-input input-mono textarea-resume" rows="28">{{ resume_json }}</textarea>
             <p class="helper-text">Edit the existing customized resume fields directly. This page regenerates the resume PDF from this edited JSON and saves it back to storage and the database.</p>
           </div>
 
           <div class="job-runner">
             <label class="field-label" for="cover-letter-text">Cover Letter Text</label>
-            <textarea id="cover-letter-text" name="cover_letter_text" class="job-input" rows="18" style="min-height: 420px;">{{ cover_letter_text }}</textarea>
+            <textarea id="cover-letter-text" name="cover_letter_text" class="job-input textarea-cover" rows="18">{{ cover_letter_text }}</textarea>
             <p class="helper-text">Edit the current cover letter text here. If this field has content, the cover letter PDF will also be regenerated and saved.</p>
           </div>
 
-          <div class="actions-grid" style="grid-template-columns: repeat(2, minmax(0, 220px)); margin-top: 16px;">
+          <div class="actions-grid compact-actions">
             <button type="submit" class="action-button primary">Save Manual Edits</button>
-            <a class="action-button" href="{{ url_for('edit_documents', job_id=job.job_id) }}" style="text-decoration: none; text-align: center;">Reload</a>
+            <a class="action-button link-button" href="{{ url_for('edit_documents', job_id=job.job_id) }}">Reload</a>
           </div>
         </form>
       </section>
