@@ -76,6 +76,14 @@
             <button data-action="cleanup" class="action-button danger">Cleanup</button>
           </div>
           <div class="job-runner">
+            <label class="field-label" for="job-url-input">Paste Any Job Posting Link</label>
+            <div class="job-runner-row">
+              <input id="job-url-input" class="job-input" type="url" placeholder="Paste a job link from any website">
+              <button data-action="import_job_url" class="action-button dark">Import Link + Generate Resume</button>
+            </div>
+            <p class="helper-text">This fetches the job page, extracts job details and keywords, saves the job in your jobs table, and generates a customized resume using the same two-step resume flow.</p>
+          </div>
+          <div class="job-runner">
             <label class="field-label" for="resume-count-input">Generate Selected Number of Resumes</label>
             <div class="job-runner-row">
               <input id="resume-count-input" class="job-input" type="number" min="1" step="1" placeholder="Enter number like 5">
@@ -125,6 +133,7 @@
               <option value="new">New</option>
               <option value="resume_generated">Resume Generated</option>
               <option value="applied">Applied</option>
+              <option value="not_available">Not Available</option>
               <option value="scored">Scored Only</option>
               <option value="no_resume">No Resume Yet</option>
             </select>
@@ -160,8 +169,10 @@
                   <td>{{ job.provider or "—" }}</td>
                   <td>{{ job.location or "—" }}</td>
                   <td>
-                    {% if job.has_resume %}
+                    {% if job.has_resume and job.resume_pdf_available %}
                       <span class="resume-state ready">Available</span>
+                    {% elif job.has_resume %}
+                      <span class="resume-state">Text saved</span>
                     {% else %}
                       <span class="resume-state">Not generated</span>
                     {% endif %}
@@ -191,10 +202,11 @@
                       {% if job.cover_letter_download_url %}
                         <a href="{{ job.cover_letter_download_url }}">Download Cover Letter</a>
                       {% endif %}
-                      {% if job.status != "applied" %}
+                      {% if job.status != "applied" and job.status != "not_available" %}
                         <button class="mini-button" data-mark-applied="true" data-job-id="{{ job.job_id }}">Mark Applied</button>
+                        <button class="mini-button secondary" data-mark-not-available="true" data-job-id="{{ job.job_id }}">Job Not Available</button>
                       {% else %}
-                        <span class="applied-label">Applied</span>
+                        <span class="applied-label">{{ "Applied" if job.status == "applied" else "Not Available" }}</span>
                       {% endif %}
                     </div>
                   </td>
@@ -221,6 +233,7 @@
       const taskCommand = document.getElementById("task-command");
       const taskTiming = document.getElementById("task-timing");
       const jobIdInput = document.getElementById("job-id-input");
+      const jobUrlInput = document.getElementById("job-url-input");
       const resumeCountInput = document.getElementById("resume-count-input");
       const emailOverrideInput = document.getElementById("email-override-input");
       const refreshButton = document.getElementById("refresh-button");
@@ -236,6 +249,7 @@
       const actionLabels = {
         scrape: "scrape jobs",
         score: "score jobs",
+        import_job_url: "import this job link and generate a resume",
         generate_next: "generate the next highest-scored resume",
         generate_selected: "generate the selected number of highest-scored resumes",
         cleanup: "run cleanup",
@@ -327,9 +341,11 @@
 
         jobsBody.innerHTML = visibleJobs.map((job) => {
           const scoreText = job.resume_score !== null && job.resume_score !== undefined ? job.resume_score : "—";
-          const resumeState = job.has_resume
+          const resumeState = job.has_resume && job.resume_pdf_available
             ? `<span class="resume-state ready">Available</span>`
-            : `<span class="resume-state">Not generated</span>`;
+            : job.has_resume
+              ? `<span class="resume-state">Text saved</span>`
+              : `<span class="resume-state">Not generated</span>`;
 
           const links = [];
           if (job.job_url) {
@@ -350,10 +366,14 @@
           if (job.cover_letter_download_url) {
             links.push(`<a href="${escapeHtml(job.cover_letter_download_url)}">Download Cover Letter</a>`);
           }
-          if (String(job.status || "").toLowerCase() !== "applied" && job.job_id) {
+          const normalizedStatus = String(job.status || "").toLowerCase();
+          if (normalizedStatus !== "applied" && normalizedStatus !== "not_available" && job.job_id) {
             links.push(`<button class="mini-button" data-mark-applied="true" data-job-id="${escapeHtml(job.job_id)}">Mark Applied</button>`);
-          } else if (String(job.status || "").toLowerCase() === "applied") {
+            links.push(`<button class="mini-button secondary" data-mark-not-available="true" data-job-id="${escapeHtml(job.job_id)}">Job Not Available</button>`);
+          } else if (normalizedStatus === "applied") {
             links.push(`<span class="applied-label">Applied</span>`);
+          } else if (normalizedStatus === "not_available") {
+            links.push(`<span class="applied-label">Not Available</span>`);
           }
 
           return `
@@ -375,6 +395,7 @@
           `;
         }).join("");
         bindAppliedButtons();
+        bindNotAvailableButtons();
         bindCopyJdButtons();
         bindJobActionButtons();
       }
@@ -382,6 +403,12 @@
       function bindAppliedButtons() {
         document.querySelectorAll("[data-mark-applied='true']").forEach((button) => {
           button.addEventListener("click", () => markApplied(button.dataset.jobId));
+        });
+      }
+
+      function bindNotAvailableButtons() {
+        document.querySelectorAll("[data-mark-not-available='true']").forEach((button) => {
+          button.addEventListener("click", () => markNotAvailable(button.dataset.jobId));
         });
       }
 
@@ -461,6 +488,30 @@
         scheduleRefreshLoop();
       }
 
+      async function markNotAvailable(jobId) {
+        if (!jobId) {
+          return;
+        }
+
+        const isConfirmed = window.confirm(`Mark job ${jobId} as not available?`);
+        if (!isConfirmed) {
+          return;
+        }
+
+        const response = await fetch(`${jobsBaseUrl}/${encodeURIComponent(jobId)}/not-available`, {
+          method: "POST",
+          headers: { "Accept": "application/json" }
+        });
+        const payload = await response.json();
+        if (!response.ok) {
+          alert(payload.error || "Failed to mark job as not available.");
+          return;
+        }
+
+        await refreshDashboard();
+        scheduleRefreshLoop();
+      }
+
       async function copyJobDescription(button) {
         const jobTitle = button.dataset.jobTitle || "";
         const jobDescription = button.dataset.jobDescription || "";
@@ -499,6 +550,14 @@
           return;
         }
 
+        if (action === "import_job_url") {
+          const jobUrl = jobUrlInput.value.trim();
+          if (!jobUrl) {
+            alert("Paste a job URL first.");
+            return;
+          }
+        }
+
         if (action === "generate_selected") {
           count = resumeCountInput.value.trim();
           if (!count) {
@@ -516,6 +575,8 @@
         const actionLabel = actionLabels[action] || "run this action";
         const details = action === "generate_selected"
           ? ` for ${count} resume${count === "1" ? "" : "s"}`
+          : action === "import_job_url"
+            ? ` for ${jobUrlInput.value.trim()}`
           : action === "generate_next"
             ? " for the next available job"
             : (jobId ? ` for job ${jobId}` : "");
@@ -528,6 +589,9 @@
         formData.append("action", action);
         if (jobId) {
           formData.append("job_id", jobId);
+        }
+        if (action === "import_job_url") {
+          formData.append("job_url", jobUrlInput.value.trim());
         }
         if (emailOverride) {
           formData.append("email_override", emailOverride);

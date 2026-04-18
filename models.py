@@ -74,6 +74,17 @@ class ATSKeywordPlan(BaseModel):
     soft_skills: List[str] = Field(default_factory=list)
 
 
+class JobPostingIntakeOutput(BaseModel):
+    is_job_posting: bool = True
+    job_title: str = ""
+    company: str = ""
+    location: str = ""
+    level: str = ""
+    description: str = ""
+    hard_skills: List[str] = Field(default_factory=list)
+    soft_skills: List[str] = Field(default_factory=list)
+
+
 class ATSResumeRewriteOutput(BaseModel):
     header_title: str = ""
     summary: str
