@@ -172,7 +172,7 @@
                     {% if job.has_resume and job.resume_pdf_available %}
                       <span class="resume-state ready">Available</span>
                     {% elif job.has_resume %}
-                      <span class="resume-state">Text saved</span>
+                      <span class="resume-state text-saved">Text saved</span>
                     {% else %}
                       <span class="resume-state">Not generated</span>
                     {% endif %}
@@ -206,7 +206,11 @@
                         <button class="mini-button" data-mark-applied="true" data-job-id="{{ job.job_id }}">Mark Applied</button>
                         <button class="mini-button secondary" data-mark-not-available="true" data-job-id="{{ job.job_id }}">Job Not Available</button>
                       {% else %}
-                        <span class="applied-label">{{ "Applied" if job.status == "applied" else "Not Available" }}</span>
+                        {% if job.status == "applied" %}
+                          <span class="applied-label">Applied</span>
+                        {% else %}
+                          <span class="applied-label not-available">Not Available</span>
+                        {% endif %}
                       {% endif %}
                     </div>
                   </td>
@@ -344,7 +348,7 @@
           const resumeState = job.has_resume && job.resume_pdf_available
             ? `<span class="resume-state ready">Available</span>`
             : job.has_resume
-              ? `<span class="resume-state">Text saved</span>`
+              ? `<span class="resume-state text-saved">Text saved</span>`
               : `<span class="resume-state">Not generated</span>`;
 
           const links = [];
@@ -373,7 +377,7 @@
           } else if (normalizedStatus === "applied") {
             links.push(`<span class="applied-label">Applied</span>`);
           } else if (normalizedStatus === "not_available") {
-            links.push(`<span class="applied-label">Not Available</span>`);
+            links.push(`<span class="applied-label not-available">Not Available</span>`);
           }
 
           return `

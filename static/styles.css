@@ -547,6 +547,16 @@ h2 {
   color: var(--success);
 }
 
+.applied-label.not-available {
+  background: #edf1f6;
+  color: var(--muted);
+}
+
+.resume-state.text-saved {
+  background: rgba(180, 83, 9, 0.1);
+  color: var(--warning);
+}
+
 .empty-row {
   text-align: center;
   color: var(--muted);
