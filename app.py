@@ -354,6 +354,10 @@ def _fetch_dashboard_data() -> dict:
                 "scored_jobs": 0,
                 "resumes_generated": 0,
                 "pending_jobs": 0,
+                "applied_jobs": 0,
+                "not_available_jobs": 0,
+                "cover_letters_ready": 0,
+                "ready_to_apply": 0,
             },
         }
     if "__error__" in cover_letter_map:
@@ -365,6 +369,10 @@ def _fetch_dashboard_data() -> dict:
                 "scored_jobs": 0,
                 "resumes_generated": 0,
                 "pending_jobs": 0,
+                "applied_jobs": 0,
+                "not_available_jobs": 0,
+                "cover_letters_ready": 0,
+                "ready_to_apply": 0,
             },
         }
 
@@ -389,6 +397,15 @@ def _fetch_dashboard_data() -> dict:
         "scored_jobs": sum(1 for job in jobs if job.get("resume_score") is not None),
         "resumes_generated": sum(1 for job in jobs if str(job.get("customized_resume_id") or "").strip()),
         "pending_jobs": sum(1 for job in jobs if not str(job.get("customized_resume_id") or "").strip()),
+        "applied_jobs": sum(1 for job in jobs if str(job.get("status") or "").strip().lower() == "applied"),
+        "not_available_jobs": sum(1 for job in jobs if str(job.get("status") or "").strip().lower() == "not_available"),
+        "cover_letters_ready": sum(1 for job in jobs if bool(job.get("has_cover_letter"))),
+        "ready_to_apply": sum(
+            1
+            for job in jobs
+            if bool(job.get("has_resume"))
+            and str(job.get("status") or "").strip().lower() not in {"applied", "not_available"}
+        ),
     }
 
     return {
@@ -537,6 +554,7 @@ def edit_documents(job_id: str):
     job_record = supabase_utils.get_job_by_id(cleaned_job_id)
     if not job_record:
         abort(404)
+    job_record["job_url"] = _build_job_url(job_record.get("job_url"), job_record.get("provider"), job_record.get("job_id"))
 
     customized_resume_id = str(job_record.get("customized_resume_id") or "").strip()
     if not customized_resume_id:

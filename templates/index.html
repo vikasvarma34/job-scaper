@@ -3,226 +3,285 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Job Pipeline Dashboard</title>
+    <title>Application Studio</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
   </head>
-  <body>
-    <main class="page-shell">
-      <section class="hero-panel">
-        <div>
-          <p class="eyebrow">Operations Dashboard</p>
-          <h1>Job Application Workspace</h1>
-          <p class="hero-copy">
-            Scrape, score, generate, and track every opportunity from one streamlined control center.
-          </p>
+  <body class="dashboard-body">
+    <main class="page-shell dashboard-shell">
+      <header class="topbar">
+        <div class="brand-block">
+          <p class="eyebrow">Application Studio</p>
+          <h1>Job Pipeline Workspace</h1>
+          <p class="topbar-copy">A calmer, more deliberate control center for sourcing, tailoring, and shipping applications.</p>
         </div>
-        <aside class="hero-note">
-          <p class="hero-note-label">Quick Focus</p>
-          <p class="hero-note-copy">Use <strong>Generate Next Resume</strong> for your top-priority role, then review status updates in the jobs table below.</p>
+        <div class="topbar-actions">
+          <a class="secondary-button link-button" href="#jobs-browser">Browse Jobs</a>
+          <button id="refresh-button" class="secondary-button">Refresh Data</button>
+        </div>
+      </header>
+
+      <section class="hero-banner">
+        <div class="hero-main">
+          <p class="hero-kicker">Private workflow, product-grade execution</p>
+          <h2>Everything from pasted job links to polished application documents now lives in one premium dashboard.</h2>
+          <p class="hero-copy">
+            Keep sourcing, resume generation, document editing, and application tracking in a cleaner flow with sharper hierarchy,
+            less clutter, and clearer focus on the next best action.
+          </p>
+          <div class="hero-inline-stats">
+            <article class="hero-inline-card">
+              <span>Ready to apply</span>
+              <strong id="ready-jobs">{{ data.stats.ready_to_apply }}</strong>
+            </article>
+            <article class="hero-inline-card">
+              <span>Applied</span>
+              <strong id="applied-jobs">{{ data.stats.applied_jobs }}</strong>
+            </article>
+            <article class="hero-inline-card">
+              <span>Cover letters</span>
+              <strong id="cover-letters-ready">{{ data.stats.cover_letters_ready }}</strong>
+            </article>
+          </div>
+        </div>
+
+        <aside class="hero-rail">
+          <article class="panel live-status-card">
+            <div class="panel-header">
+              <div>
+                <p class="eyebrow">Current Run</p>
+                <h3 id="task-label">{{ state.label }}</h3>
+              </div>
+              <span class="status-pill status-{{ state.status }}" id="task-status">{{ state.status }}</span>
+            </div>
+            <p class="panel-copy" id="task-command">
+              {% if state.command %}{{ " ".join(state.command) }}{% else %}No command running{% endif %}
+            </p>
+            <p class="panel-copy secondary" id="task-timing">
+              {% if state.started_at %}
+                Started: {{ state.started_at }}
+              {% else %}
+                Ready
+              {% endif %}
+            </p>
+          </article>
+
+          <article class="panel workflow-card">
+            <p class="eyebrow">Workflow Cadence</p>
+            <h3>Built for a smoother application loop</h3>
+            <div class="workflow-list">
+              <div>
+                <strong>1. Capture</strong>
+                <span>Scrape feeds or paste a single job link from any site.</span>
+              </div>
+              <div>
+                <strong>2. Generate</strong>
+                <span>Use the two-step flow for the next role, a batch, or one exact job ID.</span>
+              </div>
+              <div>
+                <strong>3. Refine</strong>
+                <span>Edit documents manually, download assets, and track final status without leaving the workspace.</span>
+              </div>
+            </div>
+          </article>
         </aside>
       </section>
 
-      <section class="stats-grid">
-        <article class="stat-card">
-          <p class="stat-label">Total Jobs</p>
-          <p class="stat-value" id="total-jobs">{{ data.stats.total_jobs }}</p>
+      <section class="stats-grid premium-stats">
+        <article class="metric-card">
+          <p class="metric-label">Total Jobs</p>
+          <p class="metric-value" id="total-jobs">{{ data.stats.total_jobs }}</p>
+          <p class="metric-copy">Everything currently loaded into the pipeline.</p>
         </article>
-        <article class="stat-card">
-          <p class="stat-label">Scored Jobs</p>
-          <p class="stat-value" id="scored-jobs">{{ data.stats.scored_jobs }}</p>
+        <article class="metric-card">
+          <p class="metric-label">Scored Roles</p>
+          <p class="metric-value" id="scored-jobs">{{ data.stats.scored_jobs }}</p>
+          <p class="metric-copy">Jobs that already have an ATS match score.</p>
         </article>
-        <article class="stat-card">
-          <p class="stat-label">Resumes Generated</p>
-          <p class="stat-value" id="generated-jobs">{{ data.stats.resumes_generated }}</p>
+        <article class="metric-card">
+          <p class="metric-label">Resumes Generated</p>
+          <p class="metric-value" id="generated-jobs">{{ data.stats.resumes_generated }}</p>
+          <p class="metric-copy">Customized resumes saved to the system.</p>
         </article>
-        <article class="stat-card">
-          <p class="stat-label">Pending Resume</p>
-          <p class="stat-value" id="pending-jobs">{{ data.stats.pending_jobs }}</p>
+        <article class="metric-card">
+          <p class="metric-label">Pending Resume</p>
+          <p class="metric-value" id="pending-jobs">{{ data.stats.pending_jobs }}</p>
+          <p class="metric-copy">Roles still waiting for tailored documents.</p>
+        </article>
+        <article class="metric-card">
+          <p class="metric-label">Not Available</p>
+          <p class="metric-value" id="unavailable-jobs">{{ data.stats.not_available_jobs }}</p>
+          <p class="metric-copy">Dead roles kept visible for cleaner tracking.</p>
+        </article>
+        <article class="metric-card accent-metric">
+          <p class="metric-label">Best Next Step</p>
+          <p class="metric-value metric-value-small">Use import + generate</p>
+          <p class="metric-copy">Paste a role URL when you want the newest job-link workflow and resume generation together.</p>
         </article>
       </section>
 
-      <section class="main-grid">
-        <article class="panel">
+      <section class="workspace-grid">
+        <article class="panel control-panel">
           <div class="panel-header">
             <div>
-              <p class="eyebrow">Current Run</p>
-              <h2 id="task-label">{{ state.label }}</h2>
+              <p class="eyebrow">Automation Studio</p>
+              <h2>Run core pipeline tasks</h2>
             </div>
-            <span class="status-pill status-{{ state.status }}" id="task-status">{{ state.status }}</span>
           </div>
-          <p class="panel-copy" id="task-command">
-            {% if state.command %}{{ " ".join(state.command) }}{% else %}No command running{% endif %}
-          </p>
-          <p class="panel-copy secondary" id="task-timing">
-            {% if state.started_at %}
-              Started: {{ state.started_at }}
-            {% else %}
-              Ready
-            {% endif %}
-          </p>
+          <div class="control-tiles">
+            <button data-action="scrape" class="action-button action-tile primary">
+              <span class="action-label">Refresh sources</span>
+              <strong>Scrape Jobs</strong>
+              <span>Pull newly available postings into the jobs table.</span>
+            </button>
+            <button data-action="score" class="action-button action-tile">
+              <span class="action-label">Prioritize</span>
+              <strong>Score Jobs</strong>
+              <span>Update match scores so the best opportunities rise to the top.</span>
+            </button>
+            <button data-action="generate_next" class="action-button action-tile dark">
+              <span class="action-label">Fastest path</span>
+              <strong>Generate Next Resume</strong>
+              <span>Create a tailored resume for the highest-priority unsolved role.</span>
+            </button>
+            <button data-action="cleanup" class="action-button action-tile danger">
+              <span class="action-label">Maintenance</span>
+              <strong>Cleanup</strong>
+              <span>Run cleanup operations to keep the workspace tidy.</span>
+            </button>
+          </div>
         </article>
 
-        <article class="panel">
+        <article class="panel intake-panel">
           <div class="panel-header">
             <div>
-              <p class="eyebrow">Actions</p>
-              <h2>Run Tasks</h2>
+              <p class="eyebrow">Guided Inputs</p>
+              <h2>Bring in jobs and generate with intent</h2>
             </div>
           </div>
-          <div class="actions-grid">
-            <button data-action="scrape" class="action-button primary">Scrape Jobs</button>
-            <button data-action="score" class="action-button">Score Jobs</button>
-            <button data-action="generate_next" class="action-button">Generate Next Resume</button>
-            <button data-action="cleanup" class="action-button danger">Cleanup</button>
-          </div>
-          <div class="job-runner">
-            <label class="field-label" for="job-url-input">Paste Any Job Posting Link</label>
-            <div class="job-runner-row">
-              <input id="job-url-input" class="job-input" type="url" placeholder="Paste a job link from any website">
-              <button data-action="import_job_url" class="action-button dark">Import Link + Generate Resume</button>
+
+          <div class="form-card form-card-highlight">
+            <div class="form-card-header">
+              <div>
+                <h3>Paste Any Job Posting Link</h3>
+                <p class="panel-copy">The newest web flow: import the page, store the job, and kick off resume generation in one move.</p>
+              </div>
             </div>
-            <p class="helper-text">This fetches the job page, extracts job details and keywords, saves the job in your jobs table, and generates a customized resume using the same two-step resume flow.</p>
-          </div>
-          <div class="job-runner">
-            <label class="field-label" for="resume-count-input">Generate Selected Number of Resumes</label>
-            <div class="job-runner-row">
-              <input id="resume-count-input" class="job-input" type="number" min="1" step="1" placeholder="Enter number like 5">
-              <button data-action="generate_selected" class="action-button">Generate Selected Number of Resumes</button>
+            <label class="field-label" for="job-url-input">Job URL</label>
+            <div class="input-row">
+              <input id="job-url-input" class="job-input" type="url" placeholder="Paste a job link from LinkedIn or any other site">
+              <button data-action="import_job_url" class="action-button primary">Import Link + Generate Resume</button>
             </div>
-            <p class="helper-text">Generate Next Resume creates only the single highest-scored job without a customized resume. Use the number field when you want to generate more than one.</p>
+            <p class="helper-text">This keeps the newer main-branch import flow front and center so it feels native to the product instead of bolted on.</p>
           </div>
-          <div class="job-runner">
-            <label class="field-label" for="job-id-input">Generate With Job ID</label>
-            <div class="job-runner-row">
-              <input id="job-id-input" class="job-input" type="text" placeholder="Enter job id like 4400767090">
-              <button data-action="generate_job" class="action-button dark">Generate With ID</button>
-            </div>
-            <p class="helper-text">Generate With ID automatically regenerates if that job already has one.</p>
+
+          <div class="form-grid">
+            <section class="form-card">
+              <h3>Generate a batch</h3>
+              <label class="field-label" for="resume-count-input">How many resumes</label>
+              <div class="input-row">
+                <input id="resume-count-input" class="job-input" type="number" min="1" step="1" placeholder="Enter a number like 5">
+                <button data-action="generate_selected" class="action-button">Generate Selected</button>
+              </div>
+              <p class="helper-text">Use this when you want more than the single highest-priority role.</p>
+            </section>
+
+            <section class="form-card">
+              <h3>Generate by job ID</h3>
+              <label class="field-label" for="job-id-input">Exact job ID</label>
+              <div class="input-row">
+                <input id="job-id-input" class="job-input" type="text" placeholder="Enter a job id like 4400767090">
+                <button data-action="generate_job" class="action-button dark">Generate With ID</button>
+              </div>
+              <p class="helper-text">Ideal when you already know the exact role you want to push through the pipeline.</p>
+            </section>
           </div>
-          <div class="job-runner">
-            <label class="field-label" for="email-override-input">Optional Email Override For Generation</label>
-            <div class="job-runner-row">
-              <input id="email-override-input" class="job-input" type="email" placeholder="Leave empty to use default email from resume.json">
-            </div>
-            <p class="helper-text">If you enter an email here, web-triggered resume and cover-letter generation will use it for this run. Leave it empty to use the default email.</p>
+
+          <div class="form-card muted-card">
+            <h3>Optional email override</h3>
+            <label class="field-label" for="email-override-input">Email used for web-triggered generation</label>
+            <input id="email-override-input" class="job-input" type="email" placeholder="Leave empty to use the default email from resume.json">
+            <p class="helper-text">This applies to resume and cover-letter generation triggered from the web workspace.</p>
           </div>
         </article>
       </section>
 
-      <section class="panel log-panel">
-        <div class="panel-header">
-          <div>
-            <p class="eyebrow">Live Logs</p>
-            <h2>Execution Output</h2>
+      <section class="console-grid">
+        <article class="panel log-panel">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">Execution Console</p>
+              <h2>Live output</h2>
+            </div>
           </div>
-          <button id="refresh-button" class="secondary-button">Refresh</button>
-        </div>
-        <pre id="log-output" class="log-output">{% if state.logs %}{{ "\n".join(state.logs) }}{% else %}No logs yet.{% endif %}</pre>
+          <p class="panel-copy">Watch the active task without losing your place in the rest of the dashboard.</p>
+          <pre id="log-output" class="log-output">{% if state.logs %}{{ "\n".join(state.logs) }}{% else %}No logs yet.{% endif %}</pre>
+        </article>
+
+        <article class="panel priority-panel">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">Focus Queue</p>
+              <h2>Top jobs worth touching next</h2>
+            </div>
+          </div>
+          <p class="panel-copy">A lighter-weight shortlist so the best opportunities do not get buried in the full list.</p>
+          <div id="priority-list" class="priority-list"></div>
+        </article>
       </section>
 
-      <section class="panel jobs-panel">
-        <div class="panel-header">
+      <section class="panel browser-panel" id="jobs-browser">
+        <div class="panel-header browser-header">
           <div>
-            <p class="eyebrow">Job Pipeline</p>
-            <h2>All Jobs</h2>
+            <p class="eyebrow">Job Browser</p>
+            <h2>Search, filter, and act without the old table clutter</h2>
+            <p class="panel-copy">Every role is now grouped into clearer cards with stronger hierarchy, better actions, and more breathing room.</p>
           </div>
-          <div class="toolbar">
-            <input id="search-input" class="search-input" type="search" placeholder="Search company, title, job id">
-            <select id="status-filter" class="filter-select">
-              <option value="all">All Statuses</option>
-              <option value="new">New</option>
-              <option value="resume_generated">Resume Generated</option>
-              <option value="applied">Applied</option>
-              <option value="not_available">Not Available</option>
-              <option value="scored">Scored Only</option>
-              <option value="no_resume">No Resume Yet</option>
-            </select>
+          <div class="browser-tools">
+            <label class="search-field">
+              <span class="field-label">Search</span>
+              <input id="search-input" class="search-input" type="search" placeholder="Search company, title, job id, location">
+            </label>
+            <label class="search-field">
+              <span class="field-label">Filter</span>
+              <select id="status-filter" class="filter-select">
+                <option value="all">All Jobs</option>
+                <option value="ready">Ready To Apply</option>
+                <option value="resume_generated">Resume Generated</option>
+                <option value="applied">Applied</option>
+                <option value="not_available">Not Available</option>
+                <option value="scored">Scored Only</option>
+                <option value="no_resume">No Resume Yet</option>
+              </select>
+            </label>
           </div>
         </div>
+
+        <div class="filter-pills">
+          <button class="filter-pill active" type="button" data-quick-filter="all">
+            <span>All Jobs</span>
+            <strong data-filter-count="all">0</strong>
+          </button>
+          <button class="filter-pill" type="button" data-quick-filter="ready">
+            <span>Ready To Apply</span>
+            <strong data-filter-count="ready">0</strong>
+          </button>
+          <button class="filter-pill" type="button" data-quick-filter="no_resume">
+            <span>No Resume</span>
+            <strong data-filter-count="no_resume">0</strong>
+          </button>
+          <button class="filter-pill" type="button" data-quick-filter="applied">
+            <span>Applied</span>
+            <strong data-filter-count="applied">0</strong>
+          </button>
+          <button class="filter-pill" type="button" data-quick-filter="not_available">
+            <span>Not Available</span>
+            <strong data-filter-count="not_available">0</strong>
+          </button>
+        </div>
+
+        <p id="jobs-summary" class="browser-summary"></p>
         <p id="jobs-error" class="error-text">{% if data.jobs_error %}{{ data.jobs_error }}{% endif %}</p>
-        <div class="table-wrap">
-          <table class="jobs-table">
-            <thead>
-              <tr>
-                <th>Job</th>
-                <th>Company</th>
-                <th>Status</th>
-                <th>Score</th>
-                <th>Provider</th>
-                <th>Location</th>
-                <th>Resume</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody id="jobs-body">
-              {% for job in data.jobs %}
-                <tr>
-                  <td>
-                    <div class="job-cell">
-                      <strong>{{ job.job_title or "Untitled Job" }}</strong>
-                      <span>{{ job.job_id }}</span>
-                    </div>
-                  </td>
-                  <td>{{ job.company or "Unknown Company" }}</td>
-                  <td><span class="table-pill">{{ job.status or "unknown" }}</span></td>
-                  <td>{{ job.resume_score if job.resume_score is not none else "—" }}</td>
-                  <td>{{ job.provider or "—" }}</td>
-                  <td>{{ job.location or "—" }}</td>
-                  <td>
-                    {% if job.has_resume and job.resume_pdf_available %}
-                      <span class="resume-state ready">Available</span>
-                    {% elif job.has_resume %}
-                      <span class="resume-state text-saved">Text saved</span>
-                    {% else %}
-                      <span class="resume-state">Not generated</span>
-                    {% endif %}
-                  </td>
-                  <td>
-                    <div class="table-links">
-                      {% if job.job_url %}
-                        <a href="{{ job.job_url }}" target="_blank" rel="noreferrer">Open Job</a>
-                      {% endif %}
-                      <button
-                        class="mini-button secondary"
-                        data-copy-jd="true"
-                        data-job-title="{{ job.job_title or '' }}"
-                        data-job-description="{{ job.description or '' }}"
-                      >
-                        Copy JD
-                      </button>
-                      {% if job.resume_download_url %}
-                        <a href="{{ job.resume_download_url }}">Download Resume</a>
-                      {% endif %}
-                      {% if job.has_resume %}
-                        <a class="mini-button secondary" href="{{ url_for('edit_documents', job_id=job.job_id) }}" target="_blank" rel="noreferrer">Edit Docs</a>
-                      {% endif %}
-                      {% if job.has_resume %}
-                        <button class="mini-button dark" data-run-job-action="generate_cover_letter" data-job-id="{{ job.job_id }}">Generate Cover Letter</button>
-                      {% endif %}
-                      {% if job.cover_letter_download_url %}
-                        <a href="{{ job.cover_letter_download_url }}">Download Cover Letter</a>
-                      {% endif %}
-                      {% if job.status != "applied" and job.status != "not_available" %}
-                        <button class="mini-button" data-mark-applied="true" data-job-id="{{ job.job_id }}">Mark Applied</button>
-                        <button class="mini-button secondary" data-mark-not-available="true" data-job-id="{{ job.job_id }}">Job Not Available</button>
-                      {% else %}
-                        {% if job.status == "applied" %}
-                          <span class="applied-label">Applied</span>
-                        {% else %}
-                          <span class="applied-label not-available">Not Available</span>
-                        {% endif %}
-                      {% endif %}
-                    </div>
-                  </td>
-                </tr>
-              {% else %}
-                <tr>
-                  <td colspan="8" class="empty-row">No jobs loaded yet.</td>
-                </tr>
-              {% endfor %}
-            </tbody>
-          </table>
-        </div>
+        <div id="jobs-list" class="jobs-grid"></div>
       </section>
     </main>
 
@@ -231,6 +290,11 @@
       const dataUrl = "{{ url_for('data') }}";
       const runUrl = "{{ url_for('run_action') }}";
       const jobsBaseUrl = "/jobs";
+      const editBaseUrl = "/edit";
+
+      const initialState = {{ state | tojson }};
+      const initialStats = {{ data.stats | tojson }};
+
       const logOutput = document.getElementById("log-output");
       const taskLabel = document.getElementById("task-label");
       const taskStatus = document.getElementById("task-status");
@@ -241,14 +305,20 @@
       const resumeCountInput = document.getElementById("resume-count-input");
       const emailOverrideInput = document.getElementById("email-override-input");
       const refreshButton = document.getElementById("refresh-button");
-      const jobsBody = document.getElementById("jobs-body");
+      const jobsList = document.getElementById("jobs-list");
       const jobsError = document.getElementById("jobs-error");
+      const jobsSummary = document.getElementById("jobs-summary");
+      const priorityList = document.getElementById("priority-list");
       const searchInput = document.getElementById("search-input");
       const statusFilter = document.getElementById("status-filter");
       const totalJobs = document.getElementById("total-jobs");
       const scoredJobs = document.getElementById("scored-jobs");
       const generatedJobs = document.getElementById("generated-jobs");
       const pendingJobs = document.getElementById("pending-jobs");
+      const appliedJobs = document.getElementById("applied-jobs");
+      const unavailableJobs = document.getElementById("unavailable-jobs");
+      const coverLettersReady = document.getElementById("cover-letters-ready");
+      const readyJobs = document.getElementById("ready-jobs");
 
       const actionLabels = {
         scrape: "scrape jobs",
@@ -261,28 +331,182 @@
         generate_cover_letter: "generate a cover letter for this job ID"
       };
 
+      const timestampFormatter = new Intl.DateTimeFormat(undefined, {
+        month: "short",
+        day: "numeric",
+        hour: "numeric",
+        minute: "2-digit"
+      });
+
       let allJobs = {{ data.jobs | tojson }};
-      let lastKnownTaskStatus = "{{ state.status }}";
-      let lastKnownTaskId = "{{ state.id or '' }}";
+      let lastKnownTaskStatus = String(initialState.status || "idle");
+      let lastKnownTaskId = String(initialState.id || "");
       let refreshTimer = null;
 
+      function normalizeStatus(job) {
+        return String(job.status || "").trim().toLowerCase();
+      }
+
+      function humanizeText(value) {
+        return String(value || "").replaceAll("_", " ").trim() || "unknown";
+      }
+
+      function hasReadyResume(job) {
+        return Boolean(job.has_resume) && !["applied", "not_available"].includes(normalizeStatus(job));
+      }
+
+      function formatTimestamp(value) {
+        if (!value) {
+          return "Not available";
+        }
+        const date = new Date(value);
+        if (Number.isNaN(date.getTime())) {
+          return String(value);
+        }
+        return timestampFormatter.format(date);
+      }
+
+      function truncateText(value, maxLength = 220) {
+        const text = String(value || "").replace(/\s+/g, " ").trim();
+        if (!text) {
+          return "No description saved for this role yet.";
+        }
+        if (text.length <= maxLength) {
+          return text;
+        }
+        return `${text.slice(0, maxLength).trimEnd()}...`;
+      }
+
+      function escapeHtml(value) {
+        return String(value ?? "")
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#39;");
+      }
+
+      function getScoreTone(score) {
+        if (score === "—") {
+          return "score-empty";
+        }
+        const numericScore = Number(score);
+        if (numericScore >= 80) {
+          return "score-strong";
+        }
+        if (numericScore >= 60) {
+          return "score-good";
+        }
+        return "score-light";
+      }
+
+      function getStatusBadgeMarkup(job) {
+        const normalizedStatus = normalizeStatus(job);
+        let tone = "neutral";
+        if (normalizedStatus === "applied") {
+          tone = "success";
+        } else if (normalizedStatus === "not_available") {
+          tone = "muted";
+        } else if (hasReadyResume(job)) {
+          tone = "accent";
+        }
+        return `<span class="status-badge ${tone}">${escapeHtml(humanizeText(job.status || "unknown"))}</span>`;
+      }
+
+      function getResumeStateMarkup(job) {
+        if (job.has_resume && job.resume_pdf_available) {
+          return `<span class="document-badge success">Resume PDF ready</span>`;
+        }
+        if (job.has_resume) {
+          return `<span class="document-badge warning">Resume text saved</span>`;
+        }
+        return `<span class="document-badge muted">No resume yet</span>`;
+      }
+
+      function getCoverLetterStateMarkup(job) {
+        if (job.has_cover_letter) {
+          return `<span class="document-badge accent">Cover letter ready</span>`;
+        }
+        return "";
+      }
+
+      function buildActionGroups(job) {
+        const primary = [];
+        const secondary = [];
+        const jobId = escapeHtml(job.job_id || "");
+        const normalizedStatus = normalizeStatus(job);
+
+        if (job.job_url) {
+          primary.push(`<a class="mini-button" href="${escapeHtml(job.job_url)}" target="_blank" rel="noreferrer">Open Job</a>`);
+        }
+        if (job.resume_download_url) {
+          primary.push(`<a class="mini-button secondary" href="${escapeHtml(job.resume_download_url)}">Download Resume</a>`);
+        }
+        if (job.has_resume && job.job_id) {
+          primary.push(`<a class="mini-button secondary" href="${editBaseUrl}/${encodeURIComponent(job.job_id)}" target="_blank" rel="noreferrer">Edit Docs</a>`);
+        }
+
+        secondary.push(
+          `<button class="mini-button ghost" data-copy-jd="true" data-job-title="${escapeHtml(job.job_title || "")}" data-job-description="${escapeHtml(job.description || "")}">Copy JD</button>`
+        );
+
+        if (job.has_resume && job.job_id) {
+          secondary.push(`<button class="mini-button dark" data-run-job-action="generate_cover_letter" data-job-id="${jobId}">Generate Cover Letter</button>`);
+        }
+        if (job.cover_letter_download_url) {
+          secondary.push(`<a class="mini-button ghost" href="${escapeHtml(job.cover_letter_download_url)}">Download Cover Letter</a>`);
+        }
+        if (normalizedStatus !== "applied" && normalizedStatus !== "not_available" && job.job_id) {
+          secondary.push(`<button class="mini-button success" data-mark-applied="true" data-job-id="${jobId}">Mark Applied</button>`);
+          secondary.push(`<button class="mini-button muted" data-mark-not-available="true" data-job-id="${jobId}">Job Not Available</button>`);
+        } else if (normalizedStatus === "applied") {
+          secondary.push(`<span class="mini-label success">Applied</span>`);
+        } else if (normalizedStatus === "not_available") {
+          secondary.push(`<span class="mini-label muted">Not Available</span>`);
+        }
+
+        return `
+          <div class="job-actions-row">${primary.join("") || `<span class="mini-label muted">No direct links</span>`}</div>
+          <div class="job-actions-row job-actions-row-secondary">${secondary.join("")}</div>
+        `;
+      }
+
+      function matchesStatusFilter(job, filterValue) {
+        if (filterValue === "all") {
+          return true;
+        }
+        if (filterValue === "no_resume") {
+          return !job.has_resume;
+        }
+        if (filterValue === "scored") {
+          return job.resume_score !== null && job.resume_score !== undefined;
+        }
+        if (filterValue === "ready") {
+          return hasReadyResume(job);
+        }
+        if (filterValue === "resume_generated") {
+          return Boolean(job.has_resume);
+        }
+        return normalizeStatus(job) === filterValue;
+      }
+
       function updateButtons(isRunning) {
-        document.querySelectorAll(".action-button").forEach((button) => {
+        document.querySelectorAll(".action-button, button[data-run-job-action]").forEach((button) => {
           button.disabled = isRunning;
         });
       }
 
       function renderState(state) {
         taskLabel.textContent = state.label || "Idle";
-        taskStatus.textContent = state.status || "idle";
+        taskStatus.textContent = humanizeText(state.status || "idle");
         taskStatus.className = `status-pill status-${state.status || "idle"}`;
         taskCommand.textContent = state.command && state.command.length
           ? state.command.join(" ")
           : "No command running";
 
         if (state.started_at) {
-          const finished = state.finished_at ? ` | Finished: ${state.finished_at}` : "";
-          taskTiming.textContent = `Started: ${state.started_at}${finished}`;
+          const finished = state.finished_at ? ` | Finished: ${formatTimestamp(state.finished_at)}` : "";
+          taskTiming.textContent = `Started: ${formatTimestamp(state.started_at)}${finished}`;
         } else {
           taskTiming.textContent = "Ready";
         }
@@ -299,28 +523,83 @@
         scoredJobs.textContent = stats.scored_jobs || 0;
         generatedJobs.textContent = stats.resumes_generated || 0;
         pendingJobs.textContent = stats.pending_jobs || 0;
+        appliedJobs.textContent = stats.applied_jobs || 0;
+        unavailableJobs.textContent = stats.not_available_jobs || 0;
+        coverLettersReady.textContent = stats.cover_letters_ready || 0;
+        readyJobs.textContent = stats.ready_to_apply || 0;
       }
 
-      function escapeHtml(value) {
-        return String(value ?? "")
-          .replaceAll("&", "&amp;")
-          .replaceAll("<", "&lt;")
-          .replaceAll(">", "&gt;")
-          .replaceAll('"', "&quot;")
-          .replaceAll("'", "&#39;");
+      function renderFilterCounts(items) {
+        const counts = {
+          all: items.length,
+          ready: items.filter((job) => matchesStatusFilter(job, "ready")).length,
+          no_resume: items.filter((job) => matchesStatusFilter(job, "no_resume")).length,
+          applied: items.filter((job) => matchesStatusFilter(job, "applied")).length,
+          not_available: items.filter((job) => matchesStatusFilter(job, "not_available")).length
+        };
+
+        document.querySelectorAll("[data-filter-count]").forEach((node) => {
+          const key = node.dataset.filterCount || "all";
+          node.textContent = counts[key] ?? 0;
+        });
+
+        document.querySelectorAll("[data-quick-filter]").forEach((button) => {
+          button.classList.toggle("active", button.dataset.quickFilter === statusFilter.value);
+        });
       }
 
-      function matchesStatusFilter(job, filterValue) {
-        if (filterValue === "all") {
-          return true;
+      function renderPriorityJobs(items) {
+        const prioritized = items
+          .filter((job) => normalizeStatus(job) !== "applied" && normalizeStatus(job) !== "not_available")
+          .slice(0, 4);
+
+        if (!prioritized.length) {
+          priorityList.innerHTML = `
+            <article class="empty-state-card">
+              <h3>Nothing urgent in view</h3>
+              <p>Try clearing your filters or import a fresh role to seed the next action.</p>
+            </article>
+          `;
+          return;
         }
-        if (filterValue === "no_resume") {
-          return !job.has_resume;
+
+        priorityList.innerHTML = prioritized.map((job) => {
+          const scoreText = job.resume_score !== null && job.resume_score !== undefined ? job.resume_score : "—";
+          const primaryAction = job.has_resume && job.job_id
+            ? `<a class="mini-button secondary" href="${editBaseUrl}/${encodeURIComponent(job.job_id)}" target="_blank" rel="noreferrer">Edit Docs</a>`
+            : `<button class="mini-button dark" data-run-job-action="generate_job" data-job-id="${escapeHtml(job.job_id || "")}">Generate Resume</button>`;
+
+          return `
+            <article class="priority-card">
+              <div class="priority-top">
+                <div>
+                  <p class="priority-company">${escapeHtml(job.company || "Unknown Company")}</p>
+                  <h3>${escapeHtml(job.job_title || "Untitled Job")}</h3>
+                </div>
+                <span class="score-badge ${getScoreTone(scoreText)}">${escapeHtml(scoreText)}</span>
+              </div>
+              <div class="tag-row compact-row">
+                ${getStatusBadgeMarkup(job)}
+                ${getResumeStateMarkup(job)}
+              </div>
+              <p class="priority-meta">${escapeHtml(job.location || "Location unavailable")} | ${escapeHtml(job.provider || "Unknown provider")}</p>
+              <div class="job-actions-row">
+                ${job.job_url ? `<a class="mini-button" href="${escapeHtml(job.job_url)}" target="_blank" rel="noreferrer">Open Job</a>` : ""}
+                ${primaryAction}
+              </div>
+            </article>
+          `;
+        }).join("");
+
+        bindJobActionButtons();
+      }
+
+      function renderBrowserSummary(visibleCount, totalCount) {
+        if (!totalCount) {
+          jobsSummary.textContent = "No jobs available yet. Start by scraping or pasting a job link.";
+          return;
         }
-        if (filterValue === "scored") {
-          return job.resume_score !== null && job.resume_score !== undefined;
-        }
-        return String(job.status || "").toLowerCase() === filterValue;
+        jobsSummary.textContent = `Showing ${visibleCount} of ${totalCount} jobs. Use quick filters to move between intake, ready-to-apply, and completed work.`;
       }
 
       function renderJobs(items) {
@@ -332,76 +611,82 @@
             job.company || "",
             job.job_id || "",
             job.location || "",
-            job.provider || ""
+            job.provider || "",
+            job.description || ""
           ].join(" ").toLowerCase();
           const matchesSearch = !searchTerm || searchable.includes(searchTerm);
           return matchesSearch && matchesStatusFilter(job, filterValue);
         });
 
+        renderFilterCounts(items);
+        renderBrowserSummary(visibleJobs.length, items.length);
+        renderPriorityJobs(visibleJobs.length ? visibleJobs : items);
+
         if (!visibleJobs.length) {
-          jobsBody.innerHTML = `<tr><td colspan="8" class="empty-row">No jobs match the current filters.</td></tr>`;
+          jobsList.innerHTML = `
+            <article class="empty-state-card">
+              <h3>No jobs match the current view</h3>
+              <p>Adjust the search term or switch filters to surface a different slice of the pipeline.</p>
+            </article>
+          `;
+          updateButtons(lastKnownTaskStatus === "running");
           return;
         }
 
-        jobsBody.innerHTML = visibleJobs.map((job) => {
+        jobsList.innerHTML = visibleJobs.map((job) => {
           const scoreText = job.resume_score !== null && job.resume_score !== undefined ? job.resume_score : "—";
-          const resumeState = job.has_resume && job.resume_pdf_available
-            ? `<span class="resume-state ready">Available</span>`
-            : job.has_resume
-              ? `<span class="resume-state text-saved">Text saved</span>`
-              : `<span class="resume-state">Not generated</span>`;
-
-          const links = [];
-          if (job.job_url) {
-            links.push(`<a href="${escapeHtml(job.job_url)}" target="_blank" rel="noreferrer">Open Job</a>`);
-          }
-          links.push(
-            `<button class="mini-button secondary" data-copy-jd="true" data-job-title="${escapeHtml(job.job_title || "")}" data-job-description="${escapeHtml(job.description || "")}">Copy JD</button>`
-          );
-          if (job.resume_download_url) {
-            links.push(`<a href="${escapeHtml(job.resume_download_url)}">Download Resume</a>`);
-          }
-          if (job.has_resume && job.job_id) {
-            links.push(`<a class="mini-button secondary" href="/edit/${encodeURIComponent(job.job_id)}" target="_blank" rel="noreferrer">Edit Docs</a>`);
-          }
-          if (job.has_resume && job.job_id) {
-            links.push(`<button class="mini-button dark" data-run-job-action="generate_cover_letter" data-job-id="${escapeHtml(job.job_id)}">Generate Cover Letter</button>`);
-          }
-          if (job.cover_letter_download_url) {
-            links.push(`<a href="${escapeHtml(job.cover_letter_download_url)}">Download Cover Letter</a>`);
-          }
-          const normalizedStatus = String(job.status || "").toLowerCase();
-          if (normalizedStatus !== "applied" && normalizedStatus !== "not_available" && job.job_id) {
-            links.push(`<button class="mini-button" data-mark-applied="true" data-job-id="${escapeHtml(job.job_id)}">Mark Applied</button>`);
-            links.push(`<button class="mini-button secondary" data-mark-not-available="true" data-job-id="${escapeHtml(job.job_id)}">Job Not Available</button>`);
-          } else if (normalizedStatus === "applied") {
-            links.push(`<span class="applied-label">Applied</span>`);
-          } else if (normalizedStatus === "not_available") {
-            links.push(`<span class="applied-label not-available">Not Available</span>`);
-          }
+          const emailRouting = job.contact_email_override ? job.contact_email_override : "Default profile email";
 
           return `
-            <tr>
-              <td>
-                <div class="job-cell">
-                  <strong>${escapeHtml(job.job_title || "Untitled Job")}</strong>
-                  <span>${escapeHtml(job.job_id || "")}</span>
+            <article class="job-card">
+              <div class="job-card-top">
+                <div>
+                  <p class="job-card-eyebrow">${escapeHtml(job.provider || "Unknown provider")}</p>
+                  <h3>${escapeHtml(job.job_title || "Untitled Job")}</h3>
+                  <p class="job-card-company">${escapeHtml(job.company || "Unknown Company")}</p>
                 </div>
-              </td>
-              <td>${escapeHtml(job.company || "Unknown Company")}</td>
-              <td><span class="table-pill">${escapeHtml(job.status || "unknown")}</span></td>
-              <td>${escapeHtml(scoreText)}</td>
-              <td>${escapeHtml(job.provider || "—")}</td>
-              <td>${escapeHtml(job.location || "—")}</td>
-              <td>${resumeState}</td>
-              <td><div class="table-links">${links.join("") || "—"}</div></td>
-            </tr>
+                <span class="score-badge ${getScoreTone(scoreText)}">${escapeHtml(scoreText)}</span>
+              </div>
+
+              <div class="tag-row">
+                ${getStatusBadgeMarkup(job)}
+                ${getResumeStateMarkup(job)}
+                ${getCoverLetterStateMarkup(job)}
+              </div>
+
+              <div class="job-facts">
+                <div>
+                  <span class="job-fact-label">Location</span>
+                  <strong>${escapeHtml(job.location || "Unknown")}</strong>
+                </div>
+                <div>
+                  <span class="job-fact-label">Job ID</span>
+                  <strong>${escapeHtml(job.job_id || "Unknown")}</strong>
+                </div>
+                <div>
+                  <span class="job-fact-label">Scraped</span>
+                  <strong>${escapeHtml(formatTimestamp(job.scraped_at))}</strong>
+                </div>
+                <div>
+                  <span class="job-fact-label">Email routing</span>
+                  <strong>${escapeHtml(emailRouting)}</strong>
+                </div>
+              </div>
+
+              <p class="job-snippet">${escapeHtml(truncateText(job.description))}</p>
+
+              <div class="job-actions">
+                ${buildActionGroups(job)}
+              </div>
+            </article>
           `;
         }).join("");
+
         bindAppliedButtons();
         bindNotAvailableButtons();
         bindCopyJdButtons();
         bindJobActionButtons();
+        updateButtons(lastKnownTaskStatus === "running");
       }
 
       function bindAppliedButtons() {
@@ -581,9 +866,9 @@
           ? ` for ${count} resume${count === "1" ? "" : "s"}`
           : action === "import_job_url"
             ? ` for ${jobUrlInput.value.trim()}`
-          : action === "generate_next"
-            ? " for the next available job"
-            : (jobId ? ` for job ${jobId}` : "");
+            : action === "generate_next"
+              ? " for the next available job"
+              : (jobId ? ` for job ${jobId}` : "");
         const isConfirmed = window.confirm(`Are you sure you want to ${actionLabel}${details}?`);
         if (!isConfirmed) {
           return;
@@ -622,13 +907,25 @@
         button.addEventListener("click", () => runAction(button.dataset.action));
       });
 
+      document.querySelectorAll("[data-quick-filter]").forEach((button) => {
+        button.addEventListener("click", () => {
+          const nextFilter = button.dataset.quickFilter || "all";
+          statusFilter.value = nextFilter;
+          renderJobs(allJobs);
+        });
+      });
+
       refreshButton.addEventListener("click", async () => {
         await refreshDashboard();
         scheduleRefreshLoop();
       });
+
       searchInput.addEventListener("input", () => renderJobs(allJobs));
       statusFilter.addEventListener("change", () => renderJobs(allJobs));
 
+      renderState(initialState);
+      renderStats(initialStats);
+      renderJobs(allJobs);
       refreshDashboard().then(scheduleRefreshLoop);
     </script>
   </body>
