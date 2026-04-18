@@ -351,11 +351,7 @@ def get_job_by_id(job_id: str) -> dict | None:
     try:
         logging.info(f"Fetching job details for job_id: {job_id} from table '{config.SUPABASE_TABLE_NAME}'")
         response = supabase.table(config.SUPABASE_TABLE_NAME)\
-                           .select(
-                               "job_id, company, job_title, level, description, "
-                               "resume_score, customized_resume_id, status, job_state, is_active, "
-                               "contact_email_override"
-                           )\
+                           .select("*")\
                            .eq("job_id", job_id) \
                            .limit(1)\
                            .execute() # Assuming 'job_id' is the column name
@@ -369,6 +365,31 @@ def get_job_by_id(job_id: str) -> dict | None:
 
     except Exception as e:
         logging.error(f"Error fetching job data from Supabase for job_id {job_id}: {e}")
+        return None
+
+
+def upsert_job_record(job_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """
+    Inserts or updates a single job record in the jobs table.
+    The payload should use the actual jobs-table column names.
+    """
+    if not job_data or not str(job_data.get("job_id") or "").strip():
+        logging.error("job_data with a valid job_id is required to upsert a job.")
+        return None
+
+    try:
+        response = (
+            supabase.table(config.SUPABASE_TABLE_NAME)
+            .upsert(job_data)
+            .execute()
+        )
+        if response.data:
+            logging.info("Upserted job record for job_id %s.", job_data.get("job_id"))
+            return response.data[0]
+        logging.warning("Job upsert returned no data for job_id %s. Response: %s", job_data.get("job_id"), response)
+        return None
+    except Exception as e:
+        logging.error(f"Error upserting job record for {job_data.get('job_id')}: {e}", exc_info=True)
         return None
 
 
@@ -406,6 +427,36 @@ def update_job_contact_email_override(job_id: str, email_override: str | None) -
     except Exception as e:
         logging.error(f"Error updating contact email override for job_id {cleaned_job_id}: {e}")
         return False
+
+
+def mark_jobs_as_not_available(job_ids: list[str]) -> tuple[int, int]:
+    """
+    Marks jobs as not available so they are excluded from future scoring/generation.
+    """
+    cleaned_ids = [str(j).strip() for j in (job_ids or []) if str(j).strip()]
+    if not cleaned_ids:
+        logging.warning("No valid job IDs provided to mark as not available.")
+        return 0, 0
+
+    try:
+        response = (
+            supabase.table(config.SUPABASE_TABLE_NAME)
+            .update(
+                {
+                    "status": "not_available",
+                    "job_state": "not_available",
+                    "is_active": False,
+                }
+            )
+            .in_("job_id", cleaned_ids)
+            .execute()
+        )
+        updated_count = len(response.data) if getattr(response, "data", None) else 0
+        logging.info("Marked %s/%s jobs as not available.", updated_count, len(cleaned_ids))
+        return updated_count, len(cleaned_ids)
+    except Exception as e:
+        logging.error(f"Error marking jobs as not available: {e}")
+        return 0, len(cleaned_ids)
 
 def upload_customized_resume_to_storage(file_content: bytes, destination_path: str) -> Optional[str]:
     """

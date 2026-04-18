@@ -125,6 +125,7 @@ def _build_command(
     job_id: str | None,
     count: int | None,
     email_override: str | None = None,
+    job_url: str | None = None,
 ) -> tuple[str, list[str]]:
     python = sys.executable
     cleaned_email_override = str(email_override or "").strip()
@@ -138,6 +139,14 @@ def _build_command(
         return "Scrape Jobs", [python, "scraper.py"]
     if action == "score":
         return "Score Jobs", [python, "score_jobs.py"]
+    if action == "import_job_url":
+        cleaned_job_url = str(job_url or "").strip()
+        if not cleaned_job_url:
+            raise ValueError("Job URL is required.")
+        return (
+            "Import Job Link and Generate Resume",
+            _append_email_override([python, "job_link_processor.py", "--job-url", cleaned_job_url]),
+        )
     if action == "generate_next":
         return (
             "Generate Next Resume",
@@ -220,6 +229,13 @@ def _build_linkedin_url(provider: str | None, job_id: str | None) -> str:
     if (provider or "").strip().lower() == "linkedin" and str(job_id or "").strip():
         return f"https://www.linkedin.com/jobs/view/{job_id}/"
     return ""
+
+
+def _build_job_url(stored_url: str | None, provider: str | None, job_id: str | None) -> str:
+    cleaned_stored_url = str(stored_url or "").strip()
+    if cleaned_stored_url:
+        return cleaned_stored_url
+    return _build_linkedin_url(provider, job_id)
 
 
 def _fetch_cover_letter_links_by_job_id(job_ids: list[str]) -> dict[str, dict]:
@@ -305,10 +321,7 @@ def _fetch_all_jobs(batch_size: int = 500) -> tuple[list[dict], str | None]:
         while True:
             response = (
                 supabase_utils.supabase.table(config.SUPABASE_TABLE_NAME)
-                .select(
-                    "job_id, company, job_title, description, location, provider, status, application_date, "
-                    "resume_score, scraped_at, customized_resume_id, contact_email_override"
-                )
+                .select("*")
                 .order("scraped_at", desc=True)
                 .range(offset, offset + batch_size - 1)
                 .execute()
@@ -357,10 +370,12 @@ def _fetch_dashboard_data() -> dict:
 
     for job in jobs:
         resume_id = str(job.get("customized_resume_id") or "").strip()
+        resume_link = str(resume_links.get(resume_id) or "").strip() if resume_id else ""
         cover_letter_record = cover_letter_map.get(str(job.get("job_id") or "").strip(), {})
-        job["job_url"] = _build_linkedin_url(job.get("provider"), job.get("job_id"))
-        job["resume_download_url"] = f"/resume/{resume_id}/download" if resume_id else ""
+        job["job_url"] = _build_job_url(job.get("job_url"), job.get("provider"), job.get("job_id"))
+        job["resume_download_url"] = f"/resume/{resume_id}/download" if resume_link else ""
         job["has_resume"] = bool(resume_id)
+        job["resume_pdf_available"] = bool(resume_link)
         job["cover_letter_download_url"] = (
             f"/cover-letter/{job.get('job_id')}/download"
             if cover_letter_record.get("link")
@@ -407,6 +422,19 @@ def mark_job_applied(job_id: str):
     updated, requested = supabase_utils.mark_jobs_as_applied([cleaned_job_id])
     if updated <= 0:
         return jsonify({"ok": False, "error": f"Could not mark job {cleaned_job_id} as applied."}), 400
+
+    return jsonify({"ok": True, "updated": updated, "requested": requested, "job_id": cleaned_job_id})
+
+
+@app.post("/jobs/<job_id>/not-available")
+def mark_job_not_available(job_id: str):
+    cleaned_job_id = str(job_id or "").strip()
+    if not cleaned_job_id:
+        return jsonify({"ok": False, "error": "Job ID is required."}), 400
+
+    updated, requested = supabase_utils.mark_jobs_as_not_available([cleaned_job_id])
+    if updated <= 0:
+        return jsonify({"ok": False, "error": f"Could not mark job {cleaned_job_id} as not available."}), 400
 
     return jsonify({"ok": True, "updated": updated, "requested": requested, "job_id": cleaned_job_id})
 
@@ -521,6 +549,11 @@ def edit_documents(job_id: str):
     cover_letter_record = supabase_utils.get_cover_letter_by_job_id(cleaned_job_id) or {}
     stored_header_title = str(customized_resume_record.get("header_title") or "").strip()
     header_title = stored_header_title or str(job_record.get("job_title") or "").strip()
+    resume_download_url = (
+        url_for("download_resume", resume_id=customized_resume_id)
+        if str(customized_resume_record.get("resume_link") or "").strip()
+        else ""
+    )
 
     try:
         current_resume = Resume.model_validate(customized_resume_record)
@@ -620,7 +653,7 @@ def edit_documents(job_id: str):
         cover_letter_text=cover_letter_text,
         save_error=save_error,
         save_success=save_success,
-        resume_download_url=url_for("download_resume", resume_id=customized_resume_id),
+        resume_download_url=resume_download_url,
         cover_letter_download_url=(
             url_for("download_cover_letter", job_id=cleaned_job_id)
             if cover_letter_record.get("cover_letter_link")
@@ -637,6 +670,7 @@ def run_action():
 
     action = (request.form.get("action") or "").strip()
     job_id = (request.form.get("job_id") or "").strip()
+    job_url = (request.form.get("job_url") or "").strip()
     email_override = (request.form.get("email_override") or "").strip()
     count_raw = (request.form.get("count") or "").strip()
     count = None
@@ -647,7 +681,13 @@ def run_action():
             return jsonify({"ok": False, "error": "Resume count must be a valid integer."}), 400
 
     try:
-        label, command = _build_command(action, job_id or None, count, email_override or None)
+        label, command = _build_command(
+            action,
+            job_id or None,
+            count,
+            email_override or None,
+            job_url or None,
+        )
     except ValueError as exc:
         return jsonify({"ok": False, "error": str(exc)}), 400
 

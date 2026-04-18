@@ -63,34 +63,41 @@ def mark_applied(job_ids: list[str]) -> int:
 
 def _list_root_file_paths(bucket_name: str) -> list[str]:
     """
-    Lists file paths in the root of a bucket.
-    This project writes files in bucket root, so root listing is sufficient.
+    Lists file paths in a bucket recursively.
     """
     paths: list[str] = []
-    offset = 0
-    page_size = 100
+    pending_dirs = [""]
 
-    while True:
-        items = supabase.storage.from_(bucket_name).list(
-            "",
-            {
-                "limit": page_size,
-                "offset": offset,
-                "sortBy": {"column": "name", "order": "asc"},
-            },
-        )
-        if not items:
-            break
+    while pending_dirs:
+        current_dir = pending_dirs.pop()
+        offset = 0
+        page_size = 100
+        while True:
+            items = supabase.storage.from_(bucket_name).list(
+                current_dir,
+                {
+                    "limit": page_size,
+                    "offset": offset,
+                    "sortBy": {"column": "name", "order": "asc"},
+                },
+            )
+            if not items:
+                break
 
-        # Keep only file-like rows. Folders in root are not used by this project.
-        for item in items:
-            name = item.get("name")
-            if name:
-                paths.append(name)
+            for item in items:
+                name = item.get("name")
+                if not name:
+                    continue
+                item_id = item.get("id")
+                child_path = f"{current_dir}/{name}".strip("/")
+                if item_id is None:
+                    pending_dirs.append(child_path)
+                else:
+                    paths.append(child_path)
 
-        if len(items) < page_size:
-            break
-        offset += page_size
+            if len(items) < page_size:
+                break
+            offset += page_size
 
     return paths
 
@@ -116,27 +123,82 @@ def cleanup_for_free_tier(delete_base_resume: bool, delete_source_resume: bool) 
     - resumes/resume.pdf
     """
     try:
-        # 1) Delete personalized PDFs from Storage.
+        applied_jobs_response = (
+            supabase.table(config.SUPABASE_TABLE_NAME)
+            .select("job_id, customized_resume_id")
+            .eq("status", "applied")
+            .execute()
+        )
+        applied_jobs = applied_jobs_response.data or []
+        applied_job_ids = [str(row.get("job_id") or "").strip() for row in applied_jobs if str(row.get("job_id") or "").strip()]
+        applied_resume_ids = [
+            str(row.get("customized_resume_id") or "").strip()
+            for row in applied_jobs
+            if str(row.get("customized_resume_id") or "").strip()
+        ]
+
+        # 1) Delete all personalized PDFs from Storage.
         _remove_bucket_files(config.SUPABASE_STORAGE_BUCKET)
 
-        # 2) Delete generated resume rows.
-        supabase.table(config.SUPABASE_CUSTOMIZED_RESUMES_TABLE_NAME).delete().neq(
-            "id", "00000000-0000-0000-0000-000000000000"
-        ).execute()
-        logging.info("Cleared customized_resumes table.")
+        # 2) Delete generated cover-letter rows not tied to applied jobs.
+        cover_letter_table = getattr(config, "SUPABASE_CUSTOMIZED_COVER_LETTERS_TABLE_NAME", "")
+        if cover_letter_table:
+            cover_rows = (
+                supabase.table(cover_letter_table)
+                .select("job_id")
+                .execute()
+            ).data or []
+            delete_cover_job_ids = [
+                str(row.get("job_id") or "").strip()
+                for row in cover_rows
+                if str(row.get("job_id") or "").strip() and str(row.get("job_id") or "").strip() not in set(applied_job_ids)
+            ]
+            if delete_cover_job_ids:
+                supabase.table(cover_letter_table).delete().in_("job_id", delete_cover_job_ids).execute()
+            if applied_job_ids:
+                supabase.table(cover_letter_table).update({"cover_letter_link": None}).in_("job_id", applied_job_ids).execute()
+            logging.info("Cleared non-applied customized_cover_letters rows.")
 
-        # 3) Delete jobs so next day starts clean.
-        supabase.table(config.SUPABASE_TABLE_NAME).delete().neq("job_id", "").execute()
-        logging.info("Cleared jobs table.")
+        # 3) Delete generated resume rows not tied to applied jobs.
+        all_resume_rows = (
+            supabase.table(config.SUPABASE_CUSTOMIZED_RESUMES_TABLE_NAME)
+            .select("id")
+            .execute()
+        ).data or []
+        delete_resume_ids = [
+            str(row.get("id") or "").strip()
+            for row in all_resume_rows
+            if str(row.get("id") or "").strip() and str(row.get("id") or "").strip() not in set(applied_resume_ids)
+        ]
+        if delete_resume_ids:
+            supabase.table(config.SUPABASE_CUSTOMIZED_RESUMES_TABLE_NAME).delete().in_("id", delete_resume_ids).execute()
+        if applied_resume_ids:
+            supabase.table(config.SUPABASE_CUSTOMIZED_RESUMES_TABLE_NAME).update({"resume_link": None}).in_("id", applied_resume_ids).execute()
+        logging.info("Cleared non-applied customized_resumes rows.")
 
-        # 4) Optional base resume cleanup.
+        # 4) Delete jobs so next day starts clean, but keep applied history.
+        all_job_rows = (
+            supabase.table(config.SUPABASE_TABLE_NAME)
+            .select("job_id")
+            .execute()
+        ).data or []
+        delete_job_ids = [
+            str(row.get("job_id") or "").strip()
+            for row in all_job_rows
+            if str(row.get("job_id") or "").strip() and str(row.get("job_id") or "").strip() not in set(applied_job_ids)
+        ]
+        if delete_job_ids:
+            supabase.table(config.SUPABASE_TABLE_NAME).delete().in_("job_id", delete_job_ids).execute()
+        logging.info("Cleared non-applied jobs rows.")
+
+        # 5) Optional base resume cleanup.
         if delete_base_resume:
             supabase.table(config.SUPABASE_BASE_RESUME_TABLE_NAME).delete().neq(
                 "id", "00000000-0000-0000-0000-000000000000"
             ).execute()
             logging.info("Cleared base_resume table.")
 
-        # 5) Optional source resume cleanup.
+        # 6) Optional source resume cleanup.
         if delete_source_resume:
             _remove_bucket_files(config.SUPABASE_RESUME_STORAGE_BUCKET)
         else:
@@ -157,7 +219,7 @@ def export_applied_jobs_csv(output_path: str) -> int:
         response = (
             supabase.table(config.SUPABASE_TABLE_NAME)
             .select(
-                "job_id, company, job_title, location, provider, status, "
+                "job_id, company, job_title, location, provider, job_url, status, "
                 "application_date, posted_at, scraped_at, customized_resume_id, notes"
             )
             .eq("status", "applied")
@@ -195,6 +257,7 @@ def export_applied_jobs_csv(output_path: str) -> int:
             "job_title",
             "location",
             "provider",
+            "job_url",
             "status",
             "application_date",
             "posted_at",
@@ -212,6 +275,7 @@ def export_applied_jobs_csv(output_path: str) -> int:
                 provider = (row.get("provider") or "").strip().lower()
                 job_id = str(row.get("job_id") or "").strip()
                 linkedin_url = f"https://www.linkedin.com/jobs/view/{job_id}/" if provider == "linkedin" and job_id else ""
+                job_url = str(row.get("job_url") or "").strip() or linkedin_url
 
                 resume_id = str(row.get("customized_resume_id") or "").strip()
                 resume_path = resume_link_map.get(resume_id, "")
@@ -223,6 +287,7 @@ def export_applied_jobs_csv(output_path: str) -> int:
                         "job_title": row.get("job_title"),
                         "location": row.get("location"),
                         "provider": row.get("provider"),
+                        "job_url": job_url,
                         "status": row.get("status"),
                         "application_date": row.get("application_date"),
                         "posted_at": row.get("posted_at"),
