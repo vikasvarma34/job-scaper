@@ -13,6 +13,8 @@ from supabase_utils import supabase
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
+HISTORICAL_APPLIED_STATUSES = ["applied", "previously_applied"]
+
 
 def _run_python_script(script_name: str, args: list[str] | None = None) -> bool:
     script_path = Path(script_name)
@@ -125,8 +127,8 @@ def cleanup_for_free_tier(delete_base_resume: bool, delete_source_resume: bool) 
     try:
         applied_jobs_response = (
             supabase.table(config.SUPABASE_TABLE_NAME)
-            .select("job_id, customized_resume_id")
-            .eq("status", "applied")
+            .select("job_id, customized_resume_id, status")
+            .in_("status", HISTORICAL_APPLIED_STATUSES)
             .execute()
         )
         applied_jobs = applied_jobs_response.data or []
@@ -191,6 +193,15 @@ def cleanup_for_free_tier(delete_base_resume: bool, delete_source_resume: bool) 
             supabase.table(config.SUPABASE_TABLE_NAME).delete().in_("job_id", delete_job_ids).execute()
         logging.info("Cleared non-applied jobs rows.")
 
+        currently_applied_ids = [
+            str(row.get("job_id") or "").strip()
+            for row in applied_jobs
+            if str(row.get("job_id") or "").strip() and str(row.get("status") or "").strip().lower() == "applied"
+        ]
+        if currently_applied_ids:
+            supabase.table(config.SUPABASE_TABLE_NAME).update({"status": "previously_applied"}).in_("job_id", currently_applied_ids).execute()
+            logging.info("Converted %s applied jobs to previously_applied.", len(currently_applied_ids))
+
         # 5) Optional base resume cleanup.
         if delete_base_resume:
             supabase.table(config.SUPABASE_BASE_RESUME_TABLE_NAME).delete().neq(
@@ -222,7 +233,7 @@ def export_applied_jobs_csv(output_path: str) -> int:
                 "job_id, company, job_title, location, provider, job_url, status, "
                 "application_date, posted_at, scraped_at, customized_resume_id, notes"
             )
-            .eq("status", "applied")
+            .in_("status", HISTORICAL_APPLIED_STATUSES)
             .order("application_date", desc=True)
             .execute()
         )

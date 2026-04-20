@@ -108,12 +108,72 @@ def _is_linkedin_location_allowed(job_location: str | None) -> bool:
             return True
     return False
 
+def _title_min_years_requirement(job_title: str | None) -> int | None:
+    normalized_title = (job_title or "").strip().lower()
+    if not normalized_title:
+        return None
+
+    range_match = re.search(
+        r"\b(\d{1,2})\s*(?:-|–|—|to)\s*(\d{1,2})\s*(?:years?|yrs?|yr|yoe)\b",
+        normalized_title,
+    )
+    if range_match:
+        try:
+            return int(range_match.group(1))
+        except ValueError:
+            return None
+
+    plus_match = re.search(r"\b(\d{1,2})\s*\+\s*(?:years?|yrs?|yr|yoe)\b", normalized_title)
+    if plus_match:
+        try:
+            return int(plus_match.group(1))
+        except ValueError:
+            return None
+
+    exact_match = re.search(r"\b(\d{1,2})\s*(?:years?|yrs?|yr|yoe)\b", normalized_title)
+    if exact_match:
+        try:
+            return int(exact_match.group(1))
+        except ValueError:
+            return None
+    return None
+
+
+def _is_obvious_seniority_title(job_title: str | None) -> bool:
+    normalized_title = (job_title or "").strip().lower()
+    if not normalized_title:
+        return False
+
+    seniority_patterns = [
+        r"\b(?:staff|principal|architect|director|vice president|vp|head of)\b",
+        r"\b(?:sr|sr\.)\b",
+        r"\b(?:software engineer|engineer|developer|sde)\s*(?:iii|iv|v)\b",
+        r"\b(?:software engineer|engineer|developer|sde)\s*(?:3|4)\b",
+    ]
+    return any(re.search(pattern, normalized_title) for pattern in seniority_patterns)
+
+
 def _is_linkedin_role_allowed(job_title: str | None, job_level: str | None) -> bool:
     """
     Filters out non-target senior/mobile roles and keeps early-mid career roles.
     """
     normalized_title = (job_title or "").strip().lower()
     normalized_level = (job_level or "").strip().lower()
+
+    if _is_obvious_seniority_title(normalized_title):
+        return False
+
+    max_allowed_years = int(
+        getattr(
+            config,
+            "LINKEDIN_MAX_ALLOWED_MIN_EXPERIENCE_YEARS",
+            getattr(config, "LINKEDIN_MAX_ALLOWED_EXPERIENCE_YEARS", 0),
+        )
+        or 0
+    )
+    title_min_years = _title_min_years_requirement(normalized_title)
+    if max_allowed_years > 0 and title_min_years is not None and title_min_years > max_allowed_years:
+        return False
 
     excluded_title_keywords = getattr(config, "LINKEDIN_EXCLUDED_TITLE_KEYWORDS", None) or []
     for keyword in excluded_title_keywords:
@@ -967,7 +1027,10 @@ def _shortlist_with_source_quotas(
                 return False
         return True
 
-    for enforce_source_cap in (True, False):
+    enforce_strict_caps = bool(getattr(config, "SCRAPER_ENFORCE_STRICT_SOURCE_CAPS", False))
+    source_cap_passes = (True,) if enforce_strict_caps else (True, False)
+
+    for enforce_source_cap in source_cap_passes:
         for job in ranked:
             if len(selected) >= target_count:
                 break
@@ -2448,6 +2511,8 @@ if __name__ == "__main__":
     target_saved_jobs = int(getattr(config, "TARGET_SAVED_JOBS_PER_RUN", 0) or 0)
     max_per_company = max(1, int(getattr(config, "LINKEDIN_MAX_JOBS_PER_COMPANY_PER_RUN", 3)))
 
+    logging.info("\n--- Multi-source pass 1/2: LinkedIn + Indeed India ---")
+
     if "linkedin" in config.SCRAPING_SOURCES:
         logging.info("\n--- Starting LinkedIn Job Scraping ---")
         linkedin_seen_ids: set[str] = set()
@@ -2473,27 +2538,6 @@ if __name__ == "__main__":
     else:
         logging.info("\n--- Skipping LinkedIn Job Scraping per config ---")
 
-    if "naukri" in config.SCRAPING_SOURCES:
-        logging.info("\n--- Starting Naukri Job Scraping ---")
-        naukri_seen_ids: set[str] = set()
-        naukri_candidates = _collect_multilocation_source_candidates(
-            source_name="naukri",
-            locations=getattr(config, "NAUKRI_LOCATIONS", None) or getattr(config, "LINKEDIN_LOCATIONS", None) or [config.LINKEDIN_LOCATION],
-            search_queries=getattr(config, "NAUKRI_SEARCH_QUERIES", None) or getattr(config, "LINKEDIN_SEARCH_QUERIES", None) or [],
-            expanded_search_queries=getattr(config, "NAUKRI_EXPANDED_SEARCH_QUERIES", None) or [],
-            max_jobs_per_search=config.MAX_JOBS_PER_SEARCH.get("naukri", getattr(config, "DEFAULT_MAX_JOBS_PER_SEARCH", 10)),
-            candidate_limit=int(source_candidate_caps.get("naukri", 0) or 0),
-            query_processor=process_naukri_query,
-            seen_job_ids=naukri_seen_ids,
-            existing_job_ids=existing_job_ids,
-            existing_match_keys=existing_match_keys,
-            seen_match_keys=seen_job_match_keys_in_run,
-        )
-        all_candidates.extend(naukri_candidates)
-        _log_source_pool("naukri", naukri_candidates)
-    else:
-        logging.info("\n--- Skipping Naukri Job Scraping per config ---")
-
     if "indeed_india" in config.SCRAPING_SOURCES:
         logging.info("\n--- Starting Indeed India Job Scraping ---")
         indeed_seen_ids: set[str] = set()
@@ -2514,6 +2558,28 @@ if __name__ == "__main__":
         _log_source_pool("indeed_india", indeed_candidates)
     else:
         logging.info("\n--- Skipping Indeed India Job Scraping per config ---")
+
+    logging.info("\n--- Multi-source pass 2/2: Naukri ---")
+    if "naukri" in config.SCRAPING_SOURCES:
+        logging.info("\n--- Starting Naukri Job Scraping ---")
+        naukri_seen_ids: set[str] = set()
+        naukri_candidates = _collect_multilocation_source_candidates(
+            source_name="naukri",
+            locations=getattr(config, "NAUKRI_LOCATIONS", None) or getattr(config, "LINKEDIN_LOCATIONS", None) or [config.LINKEDIN_LOCATION],
+            search_queries=getattr(config, "NAUKRI_SEARCH_QUERIES", None) or getattr(config, "LINKEDIN_SEARCH_QUERIES", None) or [],
+            expanded_search_queries=getattr(config, "NAUKRI_EXPANDED_SEARCH_QUERIES", None) or [],
+            max_jobs_per_search=config.MAX_JOBS_PER_SEARCH.get("naukri", getattr(config, "DEFAULT_MAX_JOBS_PER_SEARCH", 10)),
+            candidate_limit=int(source_candidate_caps.get("naukri", 0) or 0),
+            query_processor=process_naukri_query,
+            seen_job_ids=naukri_seen_ids,
+            existing_job_ids=existing_job_ids,
+            existing_match_keys=existing_match_keys,
+            seen_match_keys=seen_job_match_keys_in_run,
+        )
+        all_candidates.extend(naukri_candidates)
+        _log_source_pool("naukri", naukri_candidates)
+    else:
+        logging.info("\n--- Skipping Naukri Job Scraping per config ---")
 
     final_jobs = _shortlist_with_source_quotas(
         candidates=all_candidates,

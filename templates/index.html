@@ -20,72 +20,6 @@
         </div>
       </header>
 
-      <section class="hero-banner">
-        <div class="hero-main">
-          <p class="hero-kicker">Private workflow, product-grade execution</p>
-          <h2>Everything from pasted job links to polished application documents now lives in one premium dashboard.</h2>
-          <p class="hero-copy">
-            Keep sourcing, resume generation, document editing, and application tracking in a cleaner flow with sharper hierarchy,
-            less clutter, and clearer focus on the next best action.
-          </p>
-          <div class="hero-inline-stats">
-            <article class="hero-inline-card">
-              <span>Ready to apply</span>
-              <strong id="ready-jobs">{{ data.stats.ready_to_apply }}</strong>
-            </article>
-            <article class="hero-inline-card">
-              <span>Applied</span>
-              <strong id="applied-jobs">{{ data.stats.applied_jobs }}</strong>
-            </article>
-            <article class="hero-inline-card">
-              <span>Cover letters</span>
-              <strong id="cover-letters-ready">{{ data.stats.cover_letters_ready }}</strong>
-            </article>
-          </div>
-        </div>
-
-        <aside class="hero-rail">
-          <article class="panel live-status-card">
-            <div class="panel-header">
-              <div>
-                <p class="eyebrow">Current Run</p>
-                <h3 id="task-label">{{ state.label }}</h3>
-              </div>
-              <span class="status-pill status-{{ state.status }}" id="task-status">{{ state.status }}</span>
-            </div>
-            <p class="panel-copy" id="task-command">
-              {% if state.command %}{{ " ".join(state.command) }}{% else %}No command running{% endif %}
-            </p>
-            <p class="panel-copy secondary" id="task-timing">
-              {% if state.started_at %}
-                Started: {{ state.started_at }}
-              {% else %}
-                Ready
-              {% endif %}
-            </p>
-          </article>
-
-          <article class="panel workflow-card">
-            <p class="eyebrow">Workflow Cadence</p>
-            <h3>Built for a smoother application loop</h3>
-            <div class="workflow-list">
-              <div>
-                <strong>1. Capture</strong>
-                <span>Scrape feeds or paste a single job link from any site.</span>
-              </div>
-              <div>
-                <strong>2. Generate</strong>
-                <span>Use the two-step flow for the next role, a batch, or one exact job ID.</span>
-              </div>
-              <div>
-                <strong>3. Refine</strong>
-                <span>Edit documents manually, download assets, and track final status without leaving the workspace.</span>
-              </div>
-            </div>
-          </article>
-        </aside>
-      </section>
-
       <section class="stats-grid premium-stats">
         <article class="metric-card">
           <p class="metric-label">Total Jobs</p>
@@ -111,11 +45,6 @@
           <p class="metric-label">Not Available</p>
           <p class="metric-value" id="unavailable-jobs">{{ data.stats.not_available_jobs }}</p>
           <p class="metric-copy">Dead roles kept visible for cleaner tracking.</p>
-        </article>
-        <article class="metric-card accent-metric">
-          <p class="metric-label">Best Next Step</p>
-          <p class="metric-value metric-value-small">Use import + generate</p>
-          <p class="metric-copy">Paste a role URL when you want the newest job-link workflow and resume generation together.</p>
         </article>
       </section>
 
@@ -148,6 +77,11 @@
               <strong>Cleanup</strong>
               <span>Run cleanup operations to keep the workspace tidy.</span>
             </button>
+            <button id="clear-scores-button" type="button" class="action-button action-tile">
+              <span class="action-label">Reset</span>
+              <strong>Clear Scores</strong>
+              <span>Clear all resume scores only. Jobs and documents are kept as-is.</span>
+            </button>
           </div>
         </article>
 
@@ -168,7 +102,7 @@
             </div>
             <label class="field-label" for="job-url-input">Job URL</label>
             <div class="input-row">
-              <input id="job-url-input" class="job-input" type="url" placeholder="Paste a job link from LinkedIn or any other site">
+              <input id="job-url-input" class="job-input" type="url" placeholder="Paste a job link from any site">
               <button data-action="import_job_url" class="action-button primary">Import Link + Generate Resume</button>
             </div>
             <p class="helper-text">This keeps the newer main-branch import flow front and center so it feels native to the product instead of bolted on.</p>
@@ -214,19 +148,13 @@
             </div>
           </div>
           <p class="panel-copy">Watch the active task without losing your place in the rest of the dashboard.</p>
+          <div class="console-actions">
+            <button id="stop-task-button" type="button" class="action-button danger">Stop Command</button>
+            <button id="save-logs-button" type="button" class="secondary-button">Copy Logs</button>
+          </div>
           <pre id="log-output" class="log-output">{% if state.logs %}{{ "\n".join(state.logs) }}{% else %}No logs yet.{% endif %}</pre>
         </article>
 
-        <article class="panel priority-panel">
-          <div class="panel-header">
-            <div>
-              <p class="eyebrow">Focus Queue</p>
-              <h2>Top jobs worth touching next</h2>
-            </div>
-          </div>
-          <p class="panel-copy">A lighter-weight shortlist so the best opportunities do not get buried in the full list.</p>
-          <div id="priority-list" class="priority-list"></div>
-        </article>
       </section>
 
       <section class="panel browser-panel" id="jobs-browser">
@@ -248,6 +176,7 @@
                 <option value="ready">Ready To Apply</option>
                 <option value="resume_generated">Resume Generated</option>
                 <option value="applied">Applied</option>
+                <option value="previously_applied">Previously Applied</option>
                 <option value="not_available">Not Available</option>
                 <option value="scored">Scored Only</option>
                 <option value="no_resume">No Resume Yet</option>
@@ -273,6 +202,10 @@
             <span>Applied</span>
             <strong data-filter-count="applied">0</strong>
           </button>
+          <button class="filter-pill" type="button" data-quick-filter="previously_applied">
+            <span>Previously Applied</span>
+            <strong data-filter-count="previously_applied">0</strong>
+          </button>
           <button class="filter-pill" type="button" data-quick-filter="not_available">
             <span>Not Available</span>
             <strong data-filter-count="not_available">0</strong>
@@ -285,15 +218,21 @@
       </section>
     </main>
 
+    <script id="initial-state-json" type="application/json">{{ state | tojson }}</script>
+    <script id="initial-stats-json" type="application/json">{{ data.stats | tojson }}</script>
+    <script id="initial-jobs-json" type="application/json">{{ data.jobs | tojson }}</script>
+
     <script>
       const statusUrl = "{{ url_for('status') }}";
       const dataUrl = "{{ url_for('data') }}";
       const runUrl = "{{ url_for('run_action') }}";
+      const stopUrl = "{{ url_for('stop_action') }}";
+      const clearScoresUrl = "/scores/clear";
       const jobsBaseUrl = "/jobs";
       const editBaseUrl = "/edit";
 
-      const initialState = {{ state | tojson }};
-      const initialStats = {{ data.stats | tojson }};
+      const initialState = JSON.parse(document.getElementById("initial-state-json").textContent || "{}");
+      const initialStats = JSON.parse(document.getElementById("initial-stats-json").textContent || "{}");
 
       const logOutput = document.getElementById("log-output");
       const taskLabel = document.getElementById("task-label");
@@ -305,6 +244,9 @@
       const resumeCountInput = document.getElementById("resume-count-input");
       const emailOverrideInput = document.getElementById("email-override-input");
       const refreshButton = document.getElementById("refresh-button");
+      const clearScoresButton = document.getElementById("clear-scores-button");
+      const stopTaskButton = document.getElementById("stop-task-button");
+      const saveLogsButton = document.getElementById("save-logs-button");
       const jobsList = document.getElementById("jobs-list");
       const jobsError = document.getElementById("jobs-error");
       const jobsSummary = document.getElementById("jobs-summary");
@@ -338,10 +280,12 @@
         minute: "2-digit"
       });
 
-      let allJobs = {{ data.jobs | tojson }};
+      let allJobs = JSON.parse(document.getElementById("initial-jobs-json").textContent || "[]");
       let lastKnownTaskStatus = String(initialState.status || "idle");
       let lastKnownTaskId = String(initialState.id || "");
       let refreshTimer = null;
+      const AUTO_SCROLL_THRESHOLD_PX = 20;
+      let isLogAutoScrollEnabled = true;
 
       function normalizeStatus(job) {
         return String(job.status || "").trim().toLowerCase();
@@ -352,7 +296,8 @@
       }
 
       function hasReadyResume(job) {
-        return Boolean(job.has_resume) && !["applied", "not_available"].includes(normalizeStatus(job));
+        return Boolean(job.has_resume)
+          && !["applied", "previously_applied", "not_available"].includes(normalizeStatus(job));
       }
 
       function formatTimestamp(value) {
@@ -405,6 +350,8 @@
         let tone = "neutral";
         if (normalizedStatus === "applied") {
           tone = "success";
+        } else if (normalizedStatus === "previously_applied") {
+          tone = "muted";
         } else if (normalizedStatus === "not_available") {
           tone = "muted";
         } else if (hasReadyResume(job)) {
@@ -431,52 +378,82 @@
       }
 
       function buildActionGroups(job) {
-        const primary = [];
-        const secondary = [];
+        const actions = [];
         const jobId = escapeHtml(job.job_id || "");
         const normalizedStatus = normalizeStatus(job);
+        const canUpdateStatus = !["applied", "previously_applied", "not_available"].includes(normalizedStatus) && job.job_id;
+        const canGenerateResume = normalizedStatus !== "not_available" && job.job_id;
+        const generateResumeLabel = job.has_resume ? "Regenerate Resume" : "Generate Resume";
 
         if (job.job_url) {
-          primary.push(`<a class="mini-button" href="${escapeHtml(job.job_url)}" target="_blank" rel="noreferrer">Open Job</a>`);
-        }
-        if (job.resume_download_url) {
-          primary.push(`<a class="mini-button secondary" href="${escapeHtml(job.resume_download_url)}">Download Resume</a>`);
-        }
-        if (job.has_resume && job.job_id) {
-          primary.push(`<a class="mini-button secondary" href="${editBaseUrl}/${encodeURIComponent(job.job_id)}" target="_blank" rel="noreferrer">Edit Docs</a>`);
+          actions.push(`<a class="mini-button ghost" href="${escapeHtml(job.job_url)}" target="_blank" rel="noreferrer">Open Job</a>`);
         }
 
-        secondary.push(
-          `<button class="mini-button ghost" data-copy-jd="true" data-job-title="${escapeHtml(job.job_title || "")}" data-job-description="${escapeHtml(job.description || "")}">Copy JD</button>`
+        if (canGenerateResume) {
+          actions.push(`<button class="mini-button dark" data-run-job-action="generate_job" data-job-id="${jobId}">${generateResumeLabel}</button>`);
+        }
+
+        if (job.has_resume && job.job_id) {
+          actions.push(`<a class="mini-button secondary" href="${editBaseUrl}/${encodeURIComponent(job.job_id)}" target="_blank" rel="noreferrer">Edit Documents</a>`);
+        }
+
+        if (job.has_resume && job.job_id) {
+          actions.push(`<button class="mini-button secondary" data-run-job-action="generate_cover_letter" data-job-id="${jobId}">Generate Cover Letter</button>`);
+        }
+
+        if (job.resume_download_url) {
+          actions.push(`<a class="mini-button ghost" href="${escapeHtml(job.resume_download_url)}">Download Resume</a>`);
+        } else if (job.has_resume && job.job_id) {
+          actions.push(`<button class="mini-button ghost" data-restore-resume="true" data-job-id="${jobId}">Rebuild Resume PDF</button>`);
+        }
+
+        if (job.cover_letter_download_url) {
+          actions.push(`<a class="mini-button ghost" href="${escapeHtml(job.cover_letter_download_url)}">Download Cover Letter</a>`);
+        }
+
+        if (canUpdateStatus) {
+          actions.push(`<button class="mini-button success" data-mark-applied="true" data-job-id="${jobId}">Mark Applied</button>`);
+        }
+
+        if (canUpdateStatus) {
+          actions.push(`<button class="mini-button muted" data-mark-not-available="true" data-job-id="${jobId}">Mark Not Available</button>`);
+        }
+
+        actions.push(
+          `<button class="mini-button ghost" data-copy-jd="true" data-job-title="${escapeHtml(job.job_title || "")}" data-job-description="${escapeHtml(job.description || "")}">Copy Job Description</button>`
         );
 
-        if (job.has_resume && job.job_id) {
-          secondary.push(`<button class="mini-button dark" data-run-job-action="generate_cover_letter" data-job-id="${jobId}">Generate Cover Letter</button>`);
-        }
-        if (job.cover_letter_download_url) {
-          secondary.push(`<a class="mini-button ghost" href="${escapeHtml(job.cover_letter_download_url)}">Download Cover Letter</a>`);
-        }
-        if (normalizedStatus !== "applied" && normalizedStatus !== "not_available" && job.job_id) {
-          secondary.push(`<button class="mini-button success" data-mark-applied="true" data-job-id="${jobId}">Mark Applied</button>`);
-          secondary.push(`<button class="mini-button muted" data-mark-not-available="true" data-job-id="${jobId}">Job Not Available</button>`);
-        } else if (normalizedStatus === "applied") {
-          secondary.push(`<span class="mini-label success">Applied</span>`);
-        } else if (normalizedStatus === "not_available") {
-          secondary.push(`<span class="mini-label muted">Not Available</span>`);
+        const statusPill = normalizedStatus === "applied"
+          ? `<span class="mini-label success">Applied</span>`
+          : normalizedStatus === "previously_applied"
+            ? `<span class="mini-label muted">Previously Applied</span>`
+            : normalizedStatus === "not_available"
+              ? `<span class="mini-label muted">Not Available</span>`
+              : "";
+
+        if (!actions.length) {
+          return `<div class="job-actions-row">${statusPill || `<span class="mini-label muted">No actions available</span>`}</div>`;
         }
 
         return `
-          <div class="job-actions-row">${primary.join("") || `<span class="mini-label muted">No direct links</span>`}</div>
-          <div class="job-actions-row job-actions-row-secondary">${secondary.join("")}</div>
+          <div class="job-actions-row">
+            ${statusPill}
+            ${actions.join("")}
+          </div>
         `;
       }
 
       function matchesStatusFilter(job, filterValue) {
+        const normalizedStatus = normalizeStatus(job);
+        if (normalizedStatus === "previously_applied" && filterValue !== "previously_applied") {
+          return false;
+        }
         if (filterValue === "all") {
           return true;
         }
         if (filterValue === "no_resume") {
-          return !job.has_resume;
+          return !job.has_resume
+            && !["applied", "previously_applied", "not_available"].includes(normalizedStatus);
         }
         if (filterValue === "scored") {
           return job.resume_score !== null && job.resume_score !== undefined;
@@ -487,54 +464,113 @@
         if (filterValue === "resume_generated") {
           return Boolean(job.has_resume);
         }
-        return normalizeStatus(job) === filterValue;
+        return normalizedStatus === filterValue;
       }
 
       function updateButtons(isRunning) {
-        document.querySelectorAll(".action-button, button[data-run-job-action]").forEach((button) => {
-          button.disabled = isRunning;
+        const taskIsActive = isRunning === "running" || isRunning === "stopping";
+        document.querySelectorAll(".action-button[data-action], button[data-run-job-action]").forEach((button) => {
+          button.disabled = taskIsActive;
         });
+        if (stopTaskButton) {
+          stopTaskButton.disabled = isRunning !== "running";
+        }
+        if (saveLogsButton) {
+          saveLogsButton.disabled = !(logOutput && String(logOutput.textContent || "").trim() && String(logOutput.textContent || "").trim() !== "No logs yet.");
+        }
+      }
+
+      async function stopRunningTask() {
+        if (lastKnownTaskStatus !== "running") {
+          return;
+        }
+        const response = await fetch(stopUrl, {
+          method: "POST",
+          headers: { "Accept": "application/json" }
+        });
+        const payload = await response.json();
+        if (!response.ok) {
+          alert(payload.error || "Could not stop the task.");
+          return;
+        }
+        await loadStatus();
+        scheduleRefreshLoop();
+      }
+
+      async function copyLogsSnapshot() {
+        if (!logOutput) {
+          return;
+        }
+        const logText = String(logOutput.textContent || "").trim();
+        if (!logText || logText === "No logs yet.") {
+          alert("No logs to copy yet.");
+          return;
+        }
+        try {
+          await navigator.clipboard.writeText(logText);
+        } catch (error) {
+          alert("Could not copy logs to clipboard.");
+          return;
+        }
+        if (saveLogsButton) {
+          const originalText = saveLogsButton.textContent;
+          saveLogsButton.textContent = "Copied";
+          window.setTimeout(() => {
+            saveLogsButton.textContent = originalText;
+          }, 1200);
+        }
       }
 
       function renderState(state) {
-        taskLabel.textContent = state.label || "Idle";
-        taskStatus.textContent = humanizeText(state.status || "idle");
-        taskStatus.className = `status-pill status-${state.status || "idle"}`;
-        taskCommand.textContent = state.command && state.command.length
-          ? state.command.join(" ")
-          : "No command running";
+        if (taskLabel) {
+          taskLabel.textContent = state.label || "Idle";
+        }
+        if (taskStatus) {
+          taskStatus.textContent = humanizeText(state.status || "idle");
+          taskStatus.className = `status-pill status-${state.status || "idle"}`;
+        }
+        if (taskCommand) {
+          taskCommand.textContent = state.command && state.command.length
+            ? state.command.join(" ")
+            : "No command running";
+        }
 
-        if (state.started_at) {
-          const finished = state.finished_at ? ` | Finished: ${formatTimestamp(state.finished_at)}` : "";
-          taskTiming.textContent = `Started: ${formatTimestamp(state.started_at)}${finished}`;
-        } else {
-          taskTiming.textContent = "Ready";
+        if (taskTiming) {
+          if (state.started_at) {
+            const finished = state.finished_at ? ` | Finished: ${formatTimestamp(state.finished_at)}` : "";
+            taskTiming.textContent = `Started: ${formatTimestamp(state.started_at)}${finished}`;
+          } else {
+            taskTiming.textContent = "Ready";
+          }
         }
 
         logOutput.textContent = state.logs && state.logs.length
           ? state.logs.join("\n")
           : "No logs yet.";
-        logOutput.scrollTop = logOutput.scrollHeight;
-        updateButtons(state.status === "running");
+        if (isLogAutoScrollEnabled) {
+          logOutput.scrollTop = logOutput.scrollHeight;
+        }
+        updateButtons(state.status || "idle");
       }
 
       function renderStats(stats) {
-        totalJobs.textContent = stats.total_jobs || 0;
-        scoredJobs.textContent = stats.scored_jobs || 0;
-        generatedJobs.textContent = stats.resumes_generated || 0;
-        pendingJobs.textContent = stats.pending_jobs || 0;
-        appliedJobs.textContent = stats.applied_jobs || 0;
-        unavailableJobs.textContent = stats.not_available_jobs || 0;
-        coverLettersReady.textContent = stats.cover_letters_ready || 0;
-        readyJobs.textContent = stats.ready_to_apply || 0;
+        if (totalJobs) totalJobs.textContent = stats.total_jobs || 0;
+        if (scoredJobs) scoredJobs.textContent = stats.scored_jobs || 0;
+        if (generatedJobs) generatedJobs.textContent = stats.resumes_generated || 0;
+        if (pendingJobs) pendingJobs.textContent = stats.pending_jobs || 0;
+        if (appliedJobs) appliedJobs.textContent = stats.applied_jobs || 0;
+        if (unavailableJobs) unavailableJobs.textContent = stats.not_available_jobs || 0;
+        if (coverLettersReady) coverLettersReady.textContent = stats.cover_letters_ready || 0;
+        if (readyJobs) readyJobs.textContent = stats.ready_to_apply || 0;
       }
 
       function renderFilterCounts(items) {
         const counts = {
-          all: items.length,
+          all: items.filter((job) => matchesStatusFilter(job, "all")).length,
           ready: items.filter((job) => matchesStatusFilter(job, "ready")).length,
           no_resume: items.filter((job) => matchesStatusFilter(job, "no_resume")).length,
           applied: items.filter((job) => matchesStatusFilter(job, "applied")).length,
+          previously_applied: items.filter((job) => matchesStatusFilter(job, "previously_applied")).length,
           not_available: items.filter((job) => matchesStatusFilter(job, "not_available")).length
         };
 
@@ -549,8 +585,11 @@
       }
 
       function renderPriorityJobs(items) {
+        if (!priorityList) {
+          return;
+        }
         const prioritized = items
-          .filter((job) => normalizeStatus(job) !== "applied" && normalizeStatus(job) !== "not_available")
+          .filter((job) => !["applied", "previously_applied", "not_available"].includes(normalizeStatus(job)))
           .slice(0, 4);
 
         if (!prioritized.length) {
@@ -565,9 +604,10 @@
 
         priorityList.innerHTML = prioritized.map((job) => {
           const scoreText = job.resume_score !== null && job.resume_score !== undefined ? job.resume_score : "—";
-          const primaryAction = job.has_resume && job.job_id
-            ? `<a class="mini-button secondary" href="${editBaseUrl}/${encodeURIComponent(job.job_id)}" target="_blank" rel="noreferrer">Edit Docs</a>`
-            : `<button class="mini-button dark" data-run-job-action="generate_job" data-job-id="${escapeHtml(job.job_id || "")}">Generate Resume</button>`;
+          let primaryAction = `<button class="mini-button dark" data-run-job-action="generate_job" data-job-id="${escapeHtml(job.job_id || "")}">Generate Resume</button>`;
+          if (job.has_resume && job.job_id) {
+            primaryAction = `<a class="mini-button secondary" href="${editBaseUrl}/${encodeURIComponent(job.job_id)}" target="_blank" rel="noreferrer">Edit Docs</a>`;
+          }
 
           return `
             <article class="priority-card">
@@ -582,7 +622,7 @@
                 ${getStatusBadgeMarkup(job)}
                 ${getResumeStateMarkup(job)}
               </div>
-              <p class="priority-meta">${escapeHtml(job.location || "Location unavailable")} | ${escapeHtml(job.provider || "Unknown provider")}</p>
+              <p class="priority-meta">${escapeHtml(job.location || "Location unavailable")}</p>
               <div class="job-actions-row">
                 ${job.job_url ? `<a class="mini-button" href="${escapeHtml(job.job_url)}" target="_blank" rel="noreferrer">Open Job</a>` : ""}
                 ${primaryAction}
@@ -591,6 +631,7 @@
           `;
         }).join("");
 
+        bindAppliedButtons();
         bindJobActionButtons();
       }
 
@@ -611,7 +652,6 @@
             job.company || "",
             job.job_id || "",
             job.location || "",
-            job.provider || "",
             job.description || ""
           ].join(" ").toLowerCase();
           const matchesSearch = !searchTerm || searchable.includes(searchTerm);
@@ -629,11 +669,11 @@
               <p>Adjust the search term or switch filters to surface a different slice of the pipeline.</p>
             </article>
           `;
-          updateButtons(lastKnownTaskStatus === "running");
+          updateButtons(lastKnownTaskStatus);
           return;
         }
 
-        jobsList.innerHTML = visibleJobs.map((job) => {
+        const renderJobCard = (job) => {
           const scoreText = job.resume_score !== null && job.resume_score !== undefined ? job.resume_score : "—";
           const emailRouting = job.contact_email_override ? job.contact_email_override : "Default profile email";
 
@@ -641,7 +681,7 @@
             <article class="job-card">
               <div class="job-card-top">
                 <div>
-                  <p class="job-card-eyebrow">${escapeHtml(job.provider || "Unknown provider")}</p>
+                  <p class="job-card-eyebrow">Job</p>
                   <h3>${escapeHtml(job.job_title || "Untitled Job")}</h3>
                   <p class="job-card-company">${escapeHtml(job.company || "Unknown Company")}</p>
                 </div>
@@ -673,25 +713,34 @@
                 </div>
               </div>
 
-              <p class="job-snippet">${escapeHtml(truncateText(job.description))}</p>
+              <p class="job-snippet">Experience Required: ${escapeHtml(job.experience_required || "Not stated")}</p>
 
               <div class="job-actions">
                 ${buildActionGroups(job)}
               </div>
             </article>
           `;
-        }).join("");
+        };
+
+        jobsList.innerHTML = visibleJobs.map((job) => renderJobCard(job)).join("");
 
         bindAppliedButtons();
+        bindRestoreResumeButtons();
         bindNotAvailableButtons();
         bindCopyJdButtons();
         bindJobActionButtons();
-        updateButtons(lastKnownTaskStatus === "running");
+        updateButtons(lastKnownTaskStatus);
       }
 
       function bindAppliedButtons() {
         document.querySelectorAll("[data-mark-applied='true']").forEach((button) => {
           button.addEventListener("click", () => markApplied(button.dataset.jobId));
+        });
+      }
+
+      function bindRestoreResumeButtons() {
+        document.querySelectorAll("[data-restore-resume='true']").forEach((button) => {
+          button.addEventListener("click", () => restoreResume(button.dataset.jobId));
         });
       }
 
@@ -801,6 +850,52 @@
         scheduleRefreshLoop();
       }
 
+      async function restoreResume(jobId) {
+        if (!jobId) {
+          return;
+        }
+
+        const isConfirmed = window.confirm(`Rebuild the saved resume PDF for job ${jobId}?`);
+        if (!isConfirmed) {
+          return;
+        }
+
+        const response = await fetch(`${jobsBaseUrl}/${encodeURIComponent(jobId)}/restore-resume`, {
+          method: "POST",
+          headers: { "Accept": "application/json" }
+        });
+        const payload = await response.json();
+        if (!response.ok) {
+          alert(payload.error || "Failed to rebuild the saved resume PDF.");
+          return;
+        }
+
+        await refreshDashboard();
+        if (payload.resume_download_url) {
+          window.open(payload.resume_download_url, "_blank", "noopener");
+        }
+        scheduleRefreshLoop();
+      }
+
+      async function clearScores() {
+        const isConfirmed = window.confirm("Clear all resume scores? Jobs and generated documents will stay unchanged.");
+        if (!isConfirmed) {
+          return;
+        }
+        const response = await fetch(clearScoresUrl, {
+          method: "POST",
+          headers: { "Accept": "application/json" }
+        });
+        const payload = await response.json();
+        if (!response.ok) {
+          alert(payload.error || "Failed to clear scores.");
+          return;
+        }
+        alert(`Cleared scores for ${payload.updated || 0} jobs.`);
+        await refreshDashboard();
+        scheduleRefreshLoop();
+      }
+
       async function copyJobDescription(button) {
         const jobTitle = button.dataset.jobTitle || "";
         const jobDescription = button.dataset.jobDescription || "";
@@ -903,7 +998,7 @@
         scheduleRefreshLoop();
       }
 
-      document.querySelectorAll(".action-button").forEach((button) => {
+      document.querySelectorAll(".action-button[data-action]").forEach((button) => {
         button.addEventListener("click", () => runAction(button.dataset.action));
       });
 
@@ -919,6 +1014,21 @@
         await refreshDashboard();
         scheduleRefreshLoop();
       });
+      if (clearScoresButton) {
+        clearScoresButton.addEventListener("click", clearScores);
+      }
+      if (stopTaskButton) {
+        stopTaskButton.addEventListener("click", stopRunningTask);
+      }
+      if (saveLogsButton) {
+        saveLogsButton.addEventListener("click", copyLogsSnapshot);
+      }
+      if (logOutput) {
+        logOutput.addEventListener("scroll", () => {
+          const distanceFromBottom = logOutput.scrollHeight - logOutput.scrollTop - logOutput.clientHeight;
+          isLogAutoScrollEnabled = distanceFromBottom <= AUTO_SCROLL_THRESHOLD_PX;
+        });
+      }
 
       searchInput.addEventListener("input", () => renderJobs(allJobs));
       statusFilter.addEventListener("change", () => renderJobs(allJobs));

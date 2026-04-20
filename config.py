@@ -28,9 +28,49 @@ LLM_API_KEY = os.environ.get("LLM_API_KEY") or os.environ.get("GEMINI_API_KEY") 
 # --- LLM Settings ---
 # Use any model supported by LiteLLM (gemini, openai/gpt-4o-mini, groq/llama-3.3-70b-versatile)
 # Full list of supported models & naming: https://docs.litellm.ai/docs/providers
-LLM_MODEL = "openai/gpt-5.4"
+LLM_MODEL = os.environ.get("LLM_MODEL", "gemini/gemini-3.1-pro-preview")
+
+# Optional: route scoring to a different provider/model than resume/cover-letter generation.
+# Sarvam chat completion is OpenAI-compatible, so use:
+#   SCORING_LLM_MODEL=openai/sarvam-105b
+#   SCORING_LLM_API_KEY=<your SARVAM_API_KEY>
+#   SCORING_LLM_API_BASE=https://api.sarvam.ai/v1
+_SARVAM_API_KEY = os.environ.get("SARVAM_API_KEY")
+SCORING_LLM_MODEL = (
+    os.environ.get("SCORING_LLM_MODEL")
+    or ("openai/sarvam-105b" if _SARVAM_API_KEY else LLM_MODEL)
+)
+SCORING_LLM_API_KEY = (
+    os.environ.get("SCORING_LLM_API_KEY")
+    or _SARVAM_API_KEY
+    or LLM_API_KEY
+)
+SCORING_LLM_API_BASE = os.environ.get("SCORING_LLM_API_BASE")
+if not SCORING_LLM_API_BASE and "sarvam" in str(SCORING_LLM_MODEL).lower():
+    SCORING_LLM_API_BASE = "https://api.sarvam.ai/v1"
+SARVAM_API_BASE = os.environ.get("SARVAM_API_BASE", "https://api.sarvam.ai/v1")
+SCORING_USE_DIRECT_SARVAM = str(os.environ.get("SCORING_USE_DIRECT_SARVAM", "")).strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+if "sarvam" in str(SCORING_LLM_MODEL).lower() and not os.environ.get("SCORING_USE_DIRECT_SARVAM"):
+    SCORING_USE_DIRECT_SARVAM = True
+SCORING_SARVAM_MAX_TOKENS = int(os.environ.get("SCORING_SARVAM_MAX_TOKENS", "4096"))
+# Scoring gate: skip jobs that clearly require more than this many years.
+# 2 means allow 0/1/2 years (including "2+"), skip 3+ roles.
+SCORING_MAX_ALLOWED_MIN_EXPERIENCE_YEARS = int(os.environ.get("SCORING_MAX_ALLOWED_MIN_EXPERIENCE_YEARS", "2"))
+SCORING_REASONING_EFFORT = str(os.environ.get("SCORING_REASONING_EFFORT", "medium")).strip().lower()
+SCORING_FALLBACK_REASONING_EFFORT = str(os.environ.get("SCORING_FALLBACK_REASONING_EFFORT", "low")).strip().lower()
+SCORING_LOG_REASONING_TRACE = str(os.environ.get("SCORING_LOG_REASONING_TRACE", "true")).strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 RESUME_GENERATION_FLOW = "legacy"  # Options: "legacy", "two_step_ai"
-TARGET_SAVED_JOBS_PER_RUN = 50
+TARGET_SAVED_JOBS_PER_RUN = 100
 SCRAPER_LOG_LEVEL = "INFO"  # Use "DEBUG" only when you want full request-by-request tracing.
 
 # --- Search Configuration ---
@@ -68,7 +108,7 @@ LINKEDIN_GEO_ID = None
 LINKEDIN_ENABLE_SECONDARY_CITY_FALLBACK = True
 # Legacy LinkedIn-only target. Multi-source runs now use TARGET_SAVED_JOBS_PER_RUN
 # together with SCRAPER_SOURCE_FINAL_CAPS below.
-LINKEDIN_MAX_NEW_JOBS_PER_RUN = 18
+LINKEDIN_MAX_NEW_JOBS_PER_RUN = 45
 # Do not move to the next city until the current city has failed to reach this target.
 LINKEDIN_MIN_TARGET_JOBS_BEFORE_NEXT_CITY = LINKEDIN_MAX_NEW_JOBS_PER_RUN
 # If the initial query set for a city underperforms, try broader backup queries in the same city first.
@@ -180,9 +220,9 @@ LINKEDIN_JOB_POSTING_DATE = "r86400" # r86400=Past 24h, r604800=Past week
 LINKEDIN_F_WT = None # Set 1=Onsite, 2=Remote, 3=Hybrid, or None for all
 # Prefilter controls to reduce wasted detail-fetch calls.
 LINKEDIN_PREFILTER_BY_TITLE_BEFORE_DETAILS = True
-LINKEDIN_MIN_CARD_FIT_SCORE = 4
-LINKEDIN_MIN_DETAIL_FIT_SCORE = 7
-LINKEDIN_MIN_SHORTLIST_FIT_SCORE = 7
+LINKEDIN_MIN_CARD_FIT_SCORE = 3
+LINKEDIN_MIN_DETAIL_FIT_SCORE = 5
+LINKEDIN_MIN_SHORTLIST_FIT_SCORE = 5
 # Reject only when the stated minimum required experience is above this value.
 # Examples allowed: 0+, 1+, 2+, 2-3, 2-4, 2-5, 3 years, 3+ years.
 # Examples rejected: 4 years, 4+ years, 5-7 years.
@@ -204,26 +244,27 @@ NAUKRI_SEARCH_QUERIES = LINKEDIN_SEARCH_QUERIES
 NAUKRI_EXPANDED_SEARCH_QUERIES = LINKEDIN_EXPANDED_SEARCH_QUERIES
 NAUKRI_LOCATIONS = LINKEDIN_LOCATIONS
 NAUKRI_RESULTS_PER_PAGE = 20
-NAUKRI_MAX_PAGES_PER_QUERY = 3
+NAUKRI_MAX_PAGES_PER_QUERY = 2
 NAUKRI_FRESHNESS_DAYS = 1
 
 INDEED_INDIA_SEARCH_QUERIES = LINKEDIN_SEARCH_QUERIES
 INDEED_INDIA_LOCATIONS = LINKEDIN_LOCATIONS
 
 SCRAPER_SOURCE_CANDIDATE_LIMITS = {
-    "linkedin": 28,
-    "naukri": 28,
-    "indeed_india": 20,
+    "linkedin": 220,
+    "naukri": 35,
+    "indeed_india": 120,
 }
 SCRAPER_SOURCE_FINAL_CAPS = {
-    "linkedin": 18,
-    "naukri": 18,
-    "indeed_india": 14,
+    "linkedin": 75,
+    "naukri": 10,
+    "indeed_india": 25,
 }
+SCRAPER_ENFORCE_STRICT_SOURCE_CAPS = True
 SCRAPER_SOURCE_PRIORITY = {
-    "linkedin": 3,
-    "naukri": 3,
-    "indeed_india": 2,
+    "linkedin": 5,
+    "naukri": 1,
+    "indeed_india": 4,
 }
 
 CAREERS_FUTURE_SEARCH_QUERIES = ["IT Support", "Full Stack Web Developer", "Application Support", "Cybersecurity Analyst", "fresher developer"]
@@ -241,9 +282,9 @@ MIN_SCORE_FOR_CUSTOM_RESUME = 85
 # Example: set to 20 for "top 20%" of currently eligible scored jobs.
 JOBS_TO_CUSTOMIZE_TOP_PERCENT = 0
 MAX_JOBS_PER_SEARCH = {
-    "linkedin": 12,
-    "naukri": 12,
-    "indeed_india": 10,
+    "linkedin": 24,
+    "naukri": 8,
+    "indeed_india": 20,
     "careers_future": 10,
 }
 
@@ -256,7 +297,7 @@ LLM_RETRY_BASE_DELAY = 10
 LLM_DAILY_REQUEST_BUDGET = 0
 LLM_REQUEST_DELAY_SECONDS = 1
 
-LINKEDIN_MAX_START = 60
+LINKEDIN_MAX_START = 100
 LINKEDIN_SEARCH_PAGE_MIN_DELAY_SECONDS = 0.5
 LINKEDIN_SEARCH_PAGE_MAX_DELAY_SECONDS = 1.5
 LINKEDIN_DETAIL_MIN_DELAY_SECONDS = 1.0
