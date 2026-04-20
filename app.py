@@ -21,6 +21,8 @@ from models import Resume
 
 
 ROOT_DIR = Path(__file__).resolve().parent
+CURRENT_APPLIED_STATUS = "applied"
+HISTORICAL_APPLIED_STATUSES = {"applied", "previously_applied"}
 
 app = Flask(__name__)
 app.config["SECRET_KEY"] = os.environ.get("FLASK_SECRET_KEY", "job-scraper-dashboard")
@@ -37,6 +39,8 @@ _task_state = {
     "returncode": None,
     "logs": deque(maxlen=1500),
 }
+_task_process: subprocess.Popen | None = None
+_stop_requested = False
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
@@ -48,6 +52,21 @@ def _env_flag(name: str, default: bool = False) -> bool:
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _sanitize_filename_token(value: object, default: str = "UNKNOWN") -> str:
+    text = str(value or "").strip()
+    if not text:
+        return default
+    text = re.sub(r"[^A-Za-z0-9]+", "_", text)
+    text = re.sub(r"_+", "_", text).strip("_")
+    return (text or default).upper()
+
+
+def _build_resume_storage_path(job_id: str, company: object) -> str:
+    company_token = _sanitize_filename_token(company, default="COMPANY")
+    job_token = _sanitize_filename_token(job_id, default="JOB")
+    return f"VIKAS_POKALA_{company_token}_{job_token}.pdf"
 
 
 def _snapshot_state() -> dict:
@@ -78,7 +97,26 @@ def _append_log(line: str) -> None:
         _task_state["logs"].append(clean_line)
 
 
+def _set_task_process(process: subprocess.Popen | None) -> None:
+    global _task_process
+    with _state_lock:
+        _task_process = process
+
+
+def _get_task_process() -> subprocess.Popen | None:
+    with _state_lock:
+        return _task_process
+
+
+def _clear_task_process(process: subprocess.Popen) -> None:
+    global _task_process
+    with _state_lock:
+        if _task_process is process:
+            _task_process = None
+
+
 def _run_command_in_background(label: str, command: list[str]) -> None:
+    global _stop_requested
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
 
@@ -93,8 +131,11 @@ def _run_command_in_background(label: str, command: list[str]) -> None:
         returncode=None,
         logs=deque([f"Starting: {' '.join(command)}"], maxlen=1500),
     )
+    with _state_lock:
+        _stop_requested = False
 
     def _worker() -> None:
+        global _stop_requested
         process = subprocess.Popen(
             command,
             cwd=str(ROOT_DIR),
@@ -104,18 +145,32 @@ def _run_command_in_background(label: str, command: list[str]) -> None:
             bufsize=1,
             env=env,
         )
+        _set_task_process(process)
+        with _state_lock:
+            should_stop_now = _stop_requested
+        if should_stop_now and process.poll() is None:
+            _append_log("Stop was requested before process startup completed. Terminating now...")
+            process.terminate()
 
         assert process.stdout is not None
         for line in process.stdout:
             _append_log(line)
 
         returncode = process.wait()
-        _append_log(f"Finished with exit code {returncode}.")
+        _clear_task_process(process)
+        current = _snapshot_state()
+        stopped = current["status"] == "stopping"
+        if stopped:
+            _append_log(f"Stopped with exit code {returncode}.")
+        else:
+            _append_log(f"Finished with exit code {returncode}.")
         _set_state(
-            status="success" if returncode == 0 else "failed",
+            status="stopped" if stopped else ("success" if returncode == 0 else "failed"),
             finished_at=_utc_now_iso(),
             returncode=returncode,
         )
+        with _state_lock:
+            _stop_requested = False
 
     threading.Thread(target=_worker, daemon=True).start()
 
@@ -236,6 +291,57 @@ def _build_job_url(stored_url: str | None, provider: str | None, job_id: str | N
     if cleaned_stored_url:
         return cleaned_stored_url
     return _build_linkedin_url(provider, job_id)
+
+
+def _extract_experience_requirement(description: str | None, job_title: str | None = None) -> str:
+    """
+    Parse an experience requirement from job text using local regex logic only.
+    Returns a short human-readable string like '2-5 years', '3+ years', '2 years',
+    or 'Not stated' when no clear requirement is found.
+    """
+    text = " ".join(
+        [
+            str(job_title or ""),
+            str(description or ""),
+        ]
+    ).strip()
+    if not text:
+        return "Not stated"
+
+    normalized = re.sub(r"\s+", " ", text.lower())
+
+    patterns: list[tuple[str, str]] = [
+        # Standard and compact ranges: 2-5 years, 2 - 5 yrs, 2to5 yoe
+        (r"(\d{1,2})\s*(?:-|–|—|to)\s*(\d{1,2})\s*(?:years?|yrs?|yr|yoe)\b", "range"),
+        # Explicit minimum phrasing
+        (
+            r"(?:at least|minimum(?: of)?|minimum|required|requires|need|needs)\s*(\d{1,2})\+?\s*(?:years?|yrs?|yr|yoe)\b",
+            "plus",
+        ),
+        # Plus-style forms with/without spaces/units: 2+, 2 +, 2+yrs, 2 + yrs
+        (r"(\d{1,2})\s*\+\s*(?:years?|yrs?|yr|yoe)?\b", "plus"),
+        (r"(\d{1,2})\+\s*(?:years?|yrs?|yr|yoe)\b", "plus"),
+        (r"(\d{1,2})\s*(?:or more|and above|plus)\s*(?:years?|yrs?|yr|yoe)\b", "plus"),
+        # Hyphen-only minimum shorthand: 2- years, 2 - years, 2-yr
+        (r"(\d{1,2})\s*-\s*(?:years?|yrs?|yr|yoe)\b", "plus"),
+        (r"(\d{1,2})\s*(?:years?|yrs?|yr|yoe)\b(?:\s+of)?\s+experience", "exact"),
+    ]
+
+    for pattern, mode in patterns:
+        match = re.search(pattern, normalized)
+        if not match:
+            continue
+        nums = [int(g) for g in match.groups() if g is not None]
+        if not nums:
+            continue
+        if mode == "range" and len(nums) >= 2:
+            low, high = min(nums), max(nums)
+            return f"{low}-{high} years"
+        if mode == "plus":
+            return f"{nums[0]}+ years"
+        return f"{nums[0]} years"
+
+    return "Not stated"
 
 
 def _fetch_cover_letter_links_by_job_id(job_ids: list[str]) -> dict[str, dict]:
@@ -381,6 +487,11 @@ def _fetch_dashboard_data() -> dict:
         resume_link = str(resume_links.get(resume_id) or "").strip() if resume_id else ""
         cover_letter_record = cover_letter_map.get(str(job.get("job_id") or "").strip(), {})
         job["job_url"] = _build_job_url(job.get("job_url"), job.get("provider"), job.get("job_id"))
+        stored_experience_required = str(job.get("experience_required") or "").strip()
+        job["experience_required"] = stored_experience_required or _extract_experience_requirement(
+            job.get("description"),
+            job.get("job_title"),
+        )
         job["resume_download_url"] = f"/resume/{resume_id}/download" if resume_link else ""
         job["has_resume"] = bool(resume_id)
         job["resume_pdf_available"] = bool(resume_link)
@@ -392,19 +503,29 @@ def _fetch_dashboard_data() -> dict:
         job["has_cover_letter"] = bool(cover_letter_record.get("link"))
         job["job_id"] = str(job.get("job_id") or "").strip()
 
+    active_jobs = [
+        job
+        for job in jobs
+        if str(job.get("status") or "").strip().lower() != "previously_applied"
+    ]
+
     stats = {
-        "total_jobs": len(jobs),
-        "scored_jobs": sum(1 for job in jobs if job.get("resume_score") is not None),
-        "resumes_generated": sum(1 for job in jobs if str(job.get("customized_resume_id") or "").strip()),
-        "pending_jobs": sum(1 for job in jobs if not str(job.get("customized_resume_id") or "").strip()),
-        "applied_jobs": sum(1 for job in jobs if str(job.get("status") or "").strip().lower() == "applied"),
-        "not_available_jobs": sum(1 for job in jobs if str(job.get("status") or "").strip().lower() == "not_available"),
-        "cover_letters_ready": sum(1 for job in jobs if bool(job.get("has_cover_letter"))),
+        "total_jobs": len(active_jobs),
+        "scored_jobs": sum(1 for job in active_jobs if job.get("resume_score") is not None),
+        "resumes_generated": sum(1 for job in active_jobs if str(job.get("customized_resume_id") or "").strip()),
+        "pending_jobs": sum(1 for job in active_jobs if not str(job.get("customized_resume_id") or "").strip()),
+        "applied_jobs": sum(
+            1
+            for job in active_jobs
+            if str(job.get("status") or "").strip().lower() == CURRENT_APPLIED_STATUS
+        ),
+        "not_available_jobs": sum(1 for job in active_jobs if str(job.get("status") or "").strip().lower() == "not_available"),
+        "cover_letters_ready": sum(1 for job in active_jobs if bool(job.get("has_cover_letter"))),
         "ready_to_apply": sum(
             1
-            for job in jobs
+            for job in active_jobs
             if bool(job.get("has_resume"))
-            and str(job.get("status") or "").strip().lower() not in {"applied", "not_available"}
+            and str(job.get("status") or "").strip().lower() not in HISTORICAL_APPLIED_STATUSES | {"not_available"}
         ),
     }
 
@@ -423,6 +544,35 @@ def index():
 @app.get("/status")
 def status():
     return jsonify(_snapshot_state())
+
+
+@app.post("/stop")
+def stop_action():
+    global _stop_requested
+    current = _snapshot_state()
+    if current["status"] != "running":
+        return jsonify({"ok": False, "error": "No running task to stop."}), 409
+
+    with _state_lock:
+        _stop_requested = True
+    process = _get_task_process()
+    if process is None:
+        _set_state(status="stopping")
+        _append_log("Stop requested. Waiting for process startup...")
+        return jsonify({"ok": True})
+    if process.poll() is not None:
+        return jsonify({"ok": False, "error": "Task already finished."}), 409
+
+    _set_state(status="stopping")
+    _append_log("Stop requested. Attempting to terminate the running command...")
+    process.terminate()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        _append_log("Terminate timed out. Force killing the process...")
+        process.kill()
+
+    return jsonify({"ok": True})
 
 
 @app.get("/data")
@@ -456,6 +606,20 @@ def mark_job_not_available(job_id: str):
     return jsonify({"ok": True, "updated": updated, "requested": requested, "job_id": cleaned_job_id})
 
 
+@app.post("/scores/clear")
+def clear_scores():
+    updated_count, previously_scored_count, error_message = supabase_utils.clear_all_job_scores()
+    if error_message:
+        return jsonify({"ok": False, "error": f"Could not clear scores: {error_message}"}), 500
+    return jsonify(
+        {
+            "ok": True,
+            "updated": updated_count,
+            "previously_scored": previously_scored_count,
+        }
+    )
+
+
 @app.post("/jobs/<job_id>/contact-email")
 def update_job_contact_email(job_id: str):
     cleaned_job_id = str(job_id or "").strip()
@@ -487,6 +651,70 @@ def update_job_contact_email(job_id: str):
             "job_id": cleaned_job_id,
             "contact_email_override": cleaned_email,
             "cleared": not bool(cleaned_email),
+        }
+    )
+
+
+@app.post("/jobs/<job_id>/restore-resume")
+def restore_job_resume(job_id: str):
+    cleaned_job_id = str(job_id or "").strip()
+    if not cleaned_job_id:
+        return jsonify({"ok": False, "error": "Job ID is required."}), 400
+
+    job_record = supabase_utils.get_job_by_id(cleaned_job_id)
+    if not job_record:
+        return jsonify({"ok": False, "error": f"Could not find job {cleaned_job_id}."}), 404
+
+    customized_resume_id = str(job_record.get("customized_resume_id") or "").strip()
+    if not customized_resume_id:
+        return jsonify({"ok": False, "error": "This job does not have saved resume data to rebuild."}), 400
+
+    customized_resume_record = supabase_utils.get_customized_resume(customized_resume_id)
+    if not customized_resume_record:
+        return jsonify({"ok": False, "error": "Saved resume data could not be found."}), 404
+
+    stored_header_title = str(customized_resume_record.get("header_title") or "").strip()
+    header_title = stored_header_title or str(job_record.get("job_title") or "").strip()
+
+    try:
+        current_resume = Resume.model_validate(customized_resume_record)
+    except Exception as exc:
+        return jsonify({"ok": False, "error": f"Failed to parse saved resume data: {exc}"}), 500
+
+    try:
+        resume_pdf = pdf_generator.create_resume_pdf(
+            current_resume,
+            header_title=header_title,
+        )
+    except Exception as exc:
+        return jsonify({"ok": False, "error": f"Failed to rebuild resume PDF: {exc}"}), 500
+
+    destination_path = (
+        str(customized_resume_record.get("resume_link") or "").strip()
+        or _build_resume_storage_path(cleaned_job_id, job_record.get("company"))
+    )
+    uploaded_resume_path = supabase_utils.upload_customized_resume_to_storage(
+        resume_pdf,
+        destination_path,
+    )
+    if not uploaded_resume_path:
+        return jsonify({"ok": False, "error": "Failed to upload rebuilt resume PDF."}), 500
+
+    updated = supabase_utils.update_customized_resume(
+        customized_resume_id,
+        current_resume,
+        uploaded_resume_path,
+        header_title=header_title,
+    )
+    if not updated:
+        return jsonify({"ok": False, "error": "Failed to update saved resume metadata after rebuild."}), 500
+
+    return jsonify(
+        {
+            "ok": True,
+            "job_id": cleaned_job_id,
+            "customized_resume_id": customized_resume_id,
+            "resume_download_url": url_for("download_resume", resume_id=customized_resume_id),
         }
     )
 

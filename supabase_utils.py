@@ -347,7 +347,12 @@ def get_jobs_to_rescore(limit: int) -> list:
         logging.error(f"Exception calling RPC get_jobs_for_rescore: {e}", exc_info=True)
         return []
 
-def update_job_score(job_id: str, score: int, resume_score_stage: str = "initial") -> bool:
+def update_job_score(
+    job_id: str,
+    score: int,
+    resume_score_stage: str = "initial",
+    experience_required: Optional[str] = None,
+) -> bool:
     """
     Updates the 'resume_score' and 'resume_score_stage' for a specific job_id in the Supabase 'jobs' table.
     Returns True on success, False on failure.
@@ -366,10 +371,33 @@ def update_job_score(job_id: str, score: int, resume_score_stage: str = "initial
             "resume_score": score,
             "resume_score_stage": resume_score_stage
         }
-        response = supabase.table(config.SUPABASE_TABLE_NAME)\
-                           .update(update_payload)\
-                           .eq("job_id", job_id)\
-                           .execute()
+        cleaned_experience_required = str(experience_required or "").strip()
+        if cleaned_experience_required:
+            update_payload["experience_required"] = cleaned_experience_required
+
+        try:
+            response = (
+                supabase.table(config.SUPABASE_TABLE_NAME)
+                .update(update_payload)
+                .eq("job_id", job_id)
+                .execute()
+            )
+        except Exception as first_error:
+            # Backward compatibility: if DB migration wasn't applied yet,
+            # retry without the new column so scoring still succeeds.
+            if "experience_required" in update_payload and "experience_required" in str(first_error).lower():
+                logging.warning(
+                    "jobs.experience_required column not found; retrying score update without experience_required."
+                )
+                update_payload.pop("experience_required", None)
+                response = (
+                    supabase.table(config.SUPABASE_TABLE_NAME)
+                    .update(update_payload)
+                    .eq("job_id", job_id)
+                    .execute()
+                )
+            else:
+                raise
 
         # Check if the update was successful (response structure might vary)
         # A common pattern is checking if data is returned or count is non-zero
@@ -391,6 +419,41 @@ def update_job_score(job_id: str, score: int, resume_score_stage: str = "initial
     except Exception as e:
         logging.error(f"Error updating score for job_id {job_id} in Supabase: {e}")
         return False
+
+
+def clear_all_job_scores() -> tuple[int, int, str | None]:
+    """
+    Clears score fields from all jobs without deleting jobs.
+    Returns (updated_count, previously_scored_count, error_message).
+    """
+    try:
+        base_query = (
+            supabase.table(config.SUPABASE_TABLE_NAME)
+            .select("job_id")
+            .not_.is_("resume_score", None)
+            .or_("status.is.null,status.neq.previously_applied")
+        )
+
+        precheck = base_query.execute()
+        previously_scored_count = len(precheck.data or [])
+
+        response = (
+            supabase.table(config.SUPABASE_TABLE_NAME)
+            .update({"resume_score": None})
+            .not_.is_("resume_score", None)
+            .or_("status.is.null,status.neq.previously_applied")
+            .execute()
+        )
+        updated_count = len(response.data or [])
+        logging.info(
+            "Cleared scores for %s jobs (previously scored: %s).",
+            updated_count,
+            previously_scored_count,
+        )
+        return updated_count, previously_scored_count, None
+    except Exception as e:
+        logging.error(f"Error clearing all job scores: {e}")
+        return 0, previously_scored_count if "previously_scored_count" in locals() else 0, str(e)
 
 def get_job_by_id(job_id: str) -> dict | None:
     """
