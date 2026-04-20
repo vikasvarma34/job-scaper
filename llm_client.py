@@ -81,6 +81,7 @@ class LLMClient:
         self,
         model: str,
         api_key: Optional[str] = None,
+        api_base: Optional[str] = None,
         max_rpm: int = 10,
         max_retries: int = 3,
         retry_base_delay: int = 10,
@@ -101,6 +102,7 @@ class LLMClient:
         """
         self.model = model
         self.api_key = api_key
+        self.api_base = api_base
         self.max_retries = max_retries
         self.retry_base_delay = retry_base_delay
         self.daily_budget = daily_budget
@@ -213,6 +215,8 @@ class LLMClient:
         # Add API key if set
         if self.api_key:
             base_kwargs["api_key"] = self.api_key
+        if self.api_base:
+            base_kwargs["api_base"] = self.api_base
 
         # Add structured output (Pydantic model)
         if response_format is not None:
@@ -260,7 +264,12 @@ class LLMClient:
                 if content:
                     return content.strip()
                 else:
-                    logger.warning("LLM returned empty content")
+                    logger.warning(f"LLM returned empty content on model {current_model} (attempt {attempt + 1}/{max_attempts}).")
+                    if attempt < max_attempts - 1:
+                        delay = random.uniform(0.8, 2.0)
+                        logger.warning(f"Retrying after empty content in {delay:.1f}s...")
+                        time.sleep(delay)
+                        continue
                     return ""
 
             except Exception as e:
@@ -304,11 +313,13 @@ class LLMClient:
 def _create_client(
     model: str,
     api_key: Optional[str] = None,
+    api_base: Optional[str] = None,
 ) -> LLMClient:
     """Create an LLMClient instance with config-based defaults."""
     return LLMClient(
         model=model,
         api_key=api_key,
+        api_base=api_base,
         max_rpm=config.LLM_MAX_RPM,
         max_retries=config.LLM_MAX_RETRIES,
         retry_base_delay=config.LLM_RETRY_BASE_DELAY,
@@ -323,4 +334,11 @@ def _create_client(
 primary_client = _create_client(
     model=config.LLM_MODEL,
     api_key=config.LLM_API_KEY,
+)
+
+# Dedicated scoring client (can be routed to a different provider/model like Sarvam)
+scoring_client = _create_client(
+    model=config.SCORING_LLM_MODEL,
+    api_key=config.SCORING_LLM_API_KEY,
+    api_base=config.SCORING_LLM_API_BASE,
 )

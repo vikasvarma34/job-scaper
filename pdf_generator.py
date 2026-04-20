@@ -1,5 +1,6 @@
 import io
 import logging
+import re
 from xml.sax.saxutils import escape
 
 from reportlab.lib.enums import TA_LEFT
@@ -78,7 +79,16 @@ def _safe_text(value: str | None) -> str:
 def _safe_multiline_text(value: str | None) -> list[str]:
     if not value or value == "NA":
         return []
-    return [line.strip() for line in str(value).splitlines() if line.strip()]
+    text = str(value).replace("\r\n", "\n").replace("\r", "\n")
+    # Split inline bullet separators into individual lines so all bullets render consistently.
+    text = re.sub(r"\s*[•·●▪◦]\s*", "\n", text)
+
+    lines: list[str] = []
+    for raw_line in text.splitlines():
+        cleaned = re.sub(r"^[-*•·●▪◦]+\s*", "", raw_line.strip()).strip()
+        if cleaned:
+            lines.append(cleaned)
+    return lines
 
 
 def _append_bullet_lines(

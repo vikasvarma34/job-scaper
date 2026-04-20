@@ -12,6 +12,27 @@ if not config.SUPABASE_URL or not config.SUPABASE_SERVICE_ROLE_KEY:
 
 supabase: Client = create_client(config.SUPABASE_URL, config.SUPABASE_SERVICE_ROLE_KEY)
 
+TRANSIENT_JOB_FIELDS = {
+    "local_fit_score",
+}
+
+
+def _sanitize_job_payload_for_supabase(job: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """
+    Removes scraper-only/transient fields before writing a job record to Supabase.
+    Returns a copied payload so callers keep their in-memory fields untouched.
+    """
+    if not job or job.get("job_id") is None:
+        return None
+
+    sanitized = dict(job)
+    sanitized["job_id"] = str(sanitized["job_id"])
+
+    for field_name in TRANSIENT_JOB_FIELDS:
+        sanitized.pop(field_name, None)
+
+    return sanitized
+
 # --- Supabase Functions ---
 def get_existing_jobs_from_supabase(batch_size: int = 1000) -> tuple[set, set]:
     """
@@ -60,36 +81,68 @@ def get_existing_jobs_from_supabase(batch_size: int = 1000) -> tuple[set, set]:
 
     return existing_ids, existing_company_title_keys
 
-def save_jobs_to_supabase(jobs_data: list):
+
+def get_existing_job_match_data_from_supabase(batch_size: int = 1000) -> tuple[set, list[dict[str, Any]]]:
+    """
+    Fetches existing job rows needed for higher-quality duplicate detection.
+    Returns:
+        - A set of job_ids
+        - A list of lightweight job dictionaries containing matching fields
+    """
+    existing_ids: set[str] = set()
+    existing_rows: list[dict[str, Any]] = []
+    offset = 0
+
+    try:
+        while True:
+            response = (
+                supabase.table(config.SUPABASE_TABLE_NAME)
+                .select("job_id, company, job_title, location, provider, job_url")
+                .range(offset, offset + batch_size - 1)
+                .execute()
+            )
+
+            data = response.data or []
+            if not data:
+                break
+
+            for item in data:
+                job_id = item.get("job_id")
+                if job_id:
+                    existing_ids.add(str(job_id))
+                existing_rows.append(item)
+
+            offset += batch_size
+
+        print(f"Fetched {len(existing_ids)} job IDs and {len(existing_rows)} job rows for duplicate matching.")
+    except Exception as e:
+        print(f"Error fetching existing job match data from Supabase: {e}")
+
+    return existing_ids, existing_rows
+
+def save_jobs_to_supabase(jobs_data: list) -> int:
     """
     Saves or updates a list of job data dictionaries to the Supabase table using upsert.
     This avoids duplicate key errors by updating existing records based on job_id.
     """
     if not jobs_data:
         print("No job data provided to save/update.")
-        return
+        return 0
 
     # Ensure job_id is present and potentially convert to the correct type if needed
     # (Assuming job_id in jobs_data is already the correct string type for your 'text' column)
     processed_jobs_data = []
     for job in jobs_data:
-        if 'job_id' in job and job['job_id'] is not None:
-             # If your Supabase job_id column was numeric, you'd convert here:
-             # try:
-             #     job['job_id'] = int(job['job_id'])
-             #     processed_jobs_data.append(job)
-             # except (ValueError, TypeError):
-             #     print(f"Warning: Invalid job_id format found: {job.get('job_id')}. Skipping.")
-             # Since it's text, just ensure it's a string (it likely already is)
-             job['job_id'] = str(job['job_id'])
-             processed_jobs_data.append(job)
+        sanitized = _sanitize_job_payload_for_supabase(job)
+        if sanitized is not None:
+             processed_jobs_data.append(sanitized)
         else:
             print(f"Warning: Job data missing job_id. Skipping: {job}")
 
 
     if not processed_jobs_data:
         print("No valid job data remaining after processing.")
-        return
+        return 0
 
     print(f"Attempting to upsert {len(processed_jobs_data)} jobs to Supabase...")
 
@@ -112,11 +165,13 @@ def save_jobs_to_supabase(jobs_data: list):
         else:
              # Log raw response if structure is unexpected or for debugging
              print(f"Attempted to upsert {len(processed_jobs_data)} jobs. Supabase response: {data}")
+        return len(processed_jobs_data)
 
     except Exception as e:
         print(f"Error upserting data to Supabase: {e}")
         # Consider logging the data that failed to upsert for debugging
         # print(f"Failed data: {processed_jobs_data}")
+        return 0
 
 
 def get_jobs_to_score(limit: int) -> list:
@@ -292,7 +347,12 @@ def get_jobs_to_rescore(limit: int) -> list:
         logging.error(f"Exception calling RPC get_jobs_for_rescore: {e}", exc_info=True)
         return []
 
-def update_job_score(job_id: str, score: int, resume_score_stage: str = "initial") -> bool:
+def update_job_score(
+    job_id: str,
+    score: int,
+    resume_score_stage: str = "initial",
+    experience_required: Optional[str] = None,
+) -> bool:
     """
     Updates the 'resume_score' and 'resume_score_stage' for a specific job_id in the Supabase 'jobs' table.
     Returns True on success, False on failure.
@@ -311,10 +371,33 @@ def update_job_score(job_id: str, score: int, resume_score_stage: str = "initial
             "resume_score": score,
             "resume_score_stage": resume_score_stage
         }
-        response = supabase.table(config.SUPABASE_TABLE_NAME)\
-                           .update(update_payload)\
-                           .eq("job_id", job_id)\
-                           .execute()
+        cleaned_experience_required = str(experience_required or "").strip()
+        if cleaned_experience_required:
+            update_payload["experience_required"] = cleaned_experience_required
+
+        try:
+            response = (
+                supabase.table(config.SUPABASE_TABLE_NAME)
+                .update(update_payload)
+                .eq("job_id", job_id)
+                .execute()
+            )
+        except Exception as first_error:
+            # Backward compatibility: if DB migration wasn't applied yet,
+            # retry without the new column so scoring still succeeds.
+            if "experience_required" in update_payload and "experience_required" in str(first_error).lower():
+                logging.warning(
+                    "jobs.experience_required column not found; retrying score update without experience_required."
+                )
+                update_payload.pop("experience_required", None)
+                response = (
+                    supabase.table(config.SUPABASE_TABLE_NAME)
+                    .update(update_payload)
+                    .eq("job_id", job_id)
+                    .execute()
+                )
+            else:
+                raise
 
         # Check if the update was successful (response structure might vary)
         # A common pattern is checking if data is returned or count is non-zero
@@ -336,6 +419,41 @@ def update_job_score(job_id: str, score: int, resume_score_stage: str = "initial
     except Exception as e:
         logging.error(f"Error updating score for job_id {job_id} in Supabase: {e}")
         return False
+
+
+def clear_all_job_scores() -> tuple[int, int, str | None]:
+    """
+    Clears score fields from all jobs without deleting jobs.
+    Returns (updated_count, previously_scored_count, error_message).
+    """
+    try:
+        base_query = (
+            supabase.table(config.SUPABASE_TABLE_NAME)
+            .select("job_id")
+            .not_.is_("resume_score", None)
+            .or_("status.is.null,status.neq.previously_applied")
+        )
+
+        precheck = base_query.execute()
+        previously_scored_count = len(precheck.data or [])
+
+        response = (
+            supabase.table(config.SUPABASE_TABLE_NAME)
+            .update({"resume_score": None})
+            .not_.is_("resume_score", None)
+            .or_("status.is.null,status.neq.previously_applied")
+            .execute()
+        )
+        updated_count = len(response.data or [])
+        logging.info(
+            "Cleared scores for %s jobs (previously scored: %s).",
+            updated_count,
+            previously_scored_count,
+        )
+        return updated_count, previously_scored_count, None
+    except Exception as e:
+        logging.error(f"Error clearing all job scores: {e}")
+        return 0, previously_scored_count if "previously_scored_count" in locals() else 0, str(e)
 
 def get_job_by_id(job_id: str) -> dict | None:
     """
@@ -373,23 +491,24 @@ def upsert_job_record(job_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     Inserts or updates a single job record in the jobs table.
     The payload should use the actual jobs-table column names.
     """
-    if not job_data or not str(job_data.get("job_id") or "").strip():
+    sanitized_job_data = _sanitize_job_payload_for_supabase(job_data)
+    if not sanitized_job_data:
         logging.error("job_data with a valid job_id is required to upsert a job.")
         return None
 
     try:
         response = (
             supabase.table(config.SUPABASE_TABLE_NAME)
-            .upsert(job_data)
+            .upsert(sanitized_job_data)
             .execute()
         )
         if response.data:
-            logging.info("Upserted job record for job_id %s.", job_data.get("job_id"))
+            logging.info("Upserted job record for job_id %s.", sanitized_job_data.get("job_id"))
             return response.data[0]
-        logging.warning("Job upsert returned no data for job_id %s. Response: %s", job_data.get("job_id"), response)
+        logging.warning("Job upsert returned no data for job_id %s. Response: %s", sanitized_job_data.get("job_id"), response)
         return None
     except Exception as e:
-        logging.error(f"Error upserting job record for {job_data.get('job_id')}: {e}", exc_info=True)
+        logging.error(f"Error upserting job record for {sanitized_job_data.get('job_id')}: {e}", exc_info=True)
         return None
 
 

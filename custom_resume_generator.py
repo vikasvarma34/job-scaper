@@ -359,11 +359,118 @@ def _apply_two_step_rewrite_to_resume(
     return personalized_resume
 
 
+def _clean_header_title_candidate(raw_value: Any) -> str:
+    text = " ".join(str(raw_value or "").strip().split())
+    if not text:
+        return ""
+
+    text = re.sub(r"[\u2013\u2014]+", "-", text)
+    text = re.sub(r"\s*/\s*", " / ", text)
+    text = re.sub(r"\s*-\s*", " - ", text)
+
+    noise_patterns = [
+        r"\b(?:urgent(?:ly)?|hiring|opening(?:s)?|walk in drive|immediate joiners only)\b",
+        r"\bfor the role of(?: an?|)\b",
+        r"\b(?:job\s*id|req(?:uisition)?(?:\s*id)?|reference code)\b[:#\s-]*[a-z0-9-]*",
+        r"₹\s?[\d,.\-a-zA-Z]+",
+        r"\b(?:salary|sal|ctc|lpa)\b[:\s-]*[\d,.\-a-zA-Z]*",
+        r"\b\d+\s*lpa\b",
+        r"\b\d+\+?\s*(?:-|to)?\s*\d*\+?\s*years?(?:\s*of experience)?\b",
+        r"\bexp(?:erience)?\b[:\s-]*\d+\s*(?:-|to)?\s*\d*\+?\s*years?",
+        r"\bloc(?:ation)?\b[:\s-]*.*$",
+    ]
+    for pattern in noise_patterns:
+        text = re.sub(pattern, " ", text, flags=re.IGNORECASE)
+
+    text = re.sub(r"\(([^)]*)\)", lambda match: " " if re.search(r"(year|exp|location|hyderabad|bangalore|bengaluru|pune|chennai|delhi)", match.group(1), flags=re.IGNORECASE) else match.group(0), text)
+    text = re.sub(r"\bat\s+[A-Za-z0-9&.,' -]+$", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s+", " ", text).strip(" ,-/")
+    return text
+
+
+def _derive_clean_header_title(raw_value: Any) -> str:
+    cleaned = _clean_header_title_candidate(raw_value)
+    if not cleaned:
+        return ""
+
+    normalized = cleaned.lower()
+    role_patterns = [
+        ("java full stack developer", "Java Full Stack Developer"),
+        ("java fullstack developer", "Java Full Stack Developer"),
+        ("java full stack engineer", "Java Full Stack Engineer"),
+        ("java fullstack engineer", "Java Full Stack Engineer"),
+        ("full stack developer", "Full Stack Developer"),
+        ("full stack engineer", "Full Stack Engineer"),
+        ("fullstack developer", "Full Stack Developer"),
+        ("fullstack engineer", "Full Stack Engineer"),
+        ("java backend developer", "Java Backend Developer"),
+        ("java backend engineer", "Java Backend Engineer"),
+        ("backend developer", "Backend Developer"),
+        ("backend engineer", "Backend Engineer"),
+        ("associate software engineer", "Associate Software Engineer"),
+        ("developer associate", "Developer Associate"),
+        ("associate java developer", "Associate Java Developer"),
+        ("java software engineer", "Java Software Engineer"),
+        ("software engineer ii", "Software Engineer II"),
+        ("software engineer 2", "Software Engineer II"),
+        ("software engineer i", "Software Engineer I"),
+        ("member of technical staff", "Member of Technical Staff"),
+        ("application developer", "Application Developer"),
+        ("java developer", "Java Developer"),
+        ("software engineer", "Software Engineer"),
+        ("software developer", "Software Developer"),
+        ("engineer", "Engineer"),
+        ("developer", "Developer"),
+    ]
+    base_role = ""
+    for pattern, display in role_patterns:
+        if pattern in normalized:
+            base_role = display
+            break
+
+    stack_modifiers = [
+        ("java", "Java"),
+        ("spring boot", "Spring Boot"),
+        ("springboot", "Spring Boot"),
+        ("react", "React"),
+        ("angularjs", "AngularJS"),
+        ("angular", "Angular"),
+        ("node.js", "Node.js"),
+        ("node", "Node.js"),
+        ("microservice", "Microservices"),
+        ("golang", "Golang"),
+        ("go ", "Go"),
+        ("sql", "SQL"),
+    ]
+
+    modifiers: list[str] = []
+    if base_role:
+        for pattern, display in stack_modifiers:
+            if pattern in normalized and display.lower() not in base_role.lower() and display not in modifiers:
+                modifiers.append(display)
+
+        max_modifiers = 1 if any(token in base_role.lower() for token in ["full stack", "backend", "java"]) else 2
+        if modifiers:
+            return f"{base_role}, {' / '.join(modifiers[:max_modifiers])}"
+        return base_role
+
+    fallback_parts = re.split(r"\s+\|\s+|\s+-\s+|@", cleaned)
+    for part in fallback_parts:
+        candidate = " ".join(part.split()).strip(" ,-/")
+        if candidate:
+            return candidate[:80].strip()
+
+    return cleaned[:80].strip()
+
+
 def _normalize_header_title(raw_title: Any, rewritten_title: Any) -> str:
-    cleaned_rewritten = str(rewritten_title or "").strip()
+    cleaned_raw = _derive_clean_header_title(raw_title)
+    if cleaned_raw:
+        return cleaned_raw
+    cleaned_rewritten = _derive_clean_header_title(rewritten_title)
     if cleaned_rewritten:
-        return " ".join(cleaned_rewritten.split())
-    return str(raw_title or "").strip()
+        return cleaned_rewritten
+    return ""
 
 
 async def rewrite_resume_with_keyword_plan(
@@ -417,6 +524,8 @@ async def rewrite_resume_with_keyword_plan(
     - Remove noisy job-board text such as salaries, locations, "Hiring", IDs, company/internal prefixes, or awkward separators when they do not belong in a resume title.
     - Preserve meaningful stack or specialization signals when they are part of the real role title.
     - If the original target title already looks clean and professional, keep it close to the original meaning.
+    - Keep the header_title concise. Prefer a nearby professional role title over a keyword-loaded rewrite.
+    - Do not stuff the header_title with more than one or two stack signals.
 
     Summary
     - Write the professional summary as one concise paragraph.
@@ -491,6 +600,7 @@ async def rewrite_resume_with_keyword_plan(
     - Soft skills must never appear as standalone entries inside the skills section; they should appear only through natural wording in the summary or bullets.
     - The skills section should contain concise named technologies, tools, platforms, databases, APIs, security items, testing tools, and named engineering practices only.
     - The header_title must be a cleaned, professional version of the target job title suitable for a resume subtitle.
+    - Prefer a short, natural role title for header_title. Keep it close to the actual role name instead of inventing a keyword-heavy title.
     - Never invent fake experience or project claims that are not evidenced by the base resume.
     - Optimize for both ATS match and human credibility.
     - Write like an experienced real resume writer: concise, specific, relevant, and natural.

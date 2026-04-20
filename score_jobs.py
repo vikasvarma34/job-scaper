@@ -1,6 +1,7 @@
 import time
 import json
 import logging
+import re
 from typing import List, Optional, Dict, Any
 import requests
 import io
@@ -9,12 +10,153 @@ import os
 
 import config
 import supabase_utils
-from llm_client import primary_client
+from llm_client import scoring_client
 
 # --- Setup Logging ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # --- Helper Functions ---
+
+def _sarvam_model_id(raw_model: str) -> str:
+    cleaned = str(raw_model or "").strip()
+    if "/" in cleaned:
+        provider, model_id = cleaned.split("/", 1)
+        if provider.lower() == "openai":
+            return model_id.strip() or "sarvam-105b"
+    return cleaned or "sarvam-105b"
+
+
+def _extract_chat_message_content(message: Any) -> str:
+    if isinstance(message, str):
+        return message.strip()
+    if isinstance(message, list):
+        parts: list[str] = []
+        for item in message:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                text = item.get("text") or item.get("content") or ""
+                if text:
+                    parts.append(str(text))
+        return "\n".join(part for part in parts if str(part).strip()).strip()
+    if isinstance(message, dict):
+        return str(message.get("content") or message.get("text") or "").strip()
+    return str(message or "").strip()
+
+
+def _request_score_with_sarvam_direct(
+    prompt: str,
+    system_prompt: str,
+    *,
+    reasoning_effort: str | None = None,
+    max_tokens: int | None = None,
+    log_reasoning_trace: bool | None = None,
+) -> str:
+    sarvam_key = str(config.SCORING_LLM_API_KEY or os.environ.get("SARVAM_API_KEY") or "").strip()
+    if not sarvam_key:
+        raise RuntimeError("SCORING_LLM_API_KEY/SARVAM_API_KEY is required for direct Sarvam scoring.")
+
+    base_url = str(
+        config.SCORING_LLM_API_BASE
+        or config.SARVAM_API_BASE
+        or "https://api.sarvam.ai/v1"
+    ).rstrip("/")
+    endpoint = f"{base_url}/chat/completions"
+    model_id = _sarvam_model_id(config.SCORING_LLM_MODEL)
+
+    if log_reasoning_trace is None:
+        log_reasoning_trace = bool(getattr(config, "SCORING_LOG_REASONING_TRACE", False))
+
+    payload = {
+        "model": model_id,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0,
+        "max_tokens": max(64, int(max_tokens or getattr(config, "SCORING_SARVAM_MAX_TOKENS", 1024))),
+    }
+    reasoning_effort = str(reasoning_effort or getattr(config, "SCORING_REASONING_EFFORT", "")).strip().lower()
+    if reasoning_effort in {"low", "medium", "high"}:
+        payload["reasoning_effort"] = reasoning_effort
+    headers = {
+        "Content-Type": "application/json",
+        "api-subscription-key": sarvam_key,
+        "Authorization": f"Bearer {sarvam_key}",
+    }
+
+    response = requests.post(endpoint, json=payload, headers=headers, timeout=90)
+    if not response.ok:
+        body_preview = response.text[:500].strip()
+        raise RuntimeError(f"Sarvam API HTTP {response.status_code}: {body_preview}")
+
+    try:
+        data = response.json()
+    except Exception as exc:
+        raise RuntimeError(f"Sarvam API returned non-JSON response: {exc}") from exc
+
+    choices = data.get("choices") or []
+    if not choices:
+        return ""
+    first_choice = choices[0] or {}
+    message = first_choice.get("message") or {}
+    content = _extract_chat_message_content(message.get("content"))
+    reasoning_trace = _extract_chat_message_content(message.get("reasoning_content"))
+    if reasoning_trace and log_reasoning_trace:
+        logging.info("Scoring reasoning trace (trimmed): %s", reasoning_trace[:300].replace("\n", " "))
+    if not content and str(first_choice.get("finish_reason") or "").strip().lower() == "length":
+        logging.warning(
+            "Sarvam response hit max_tokens before final answer. Consider increasing SCORING_SARVAM_MAX_TOKENS (current=%s).",
+            getattr(config, "SCORING_SARVAM_MAX_TOKENS", 512),
+        )
+    return content.strip()
+
+
+def _parse_min_years_requirement(text: str) -> tuple[Optional[int], str]:
+    normalized = str(text or "").lower()
+    if not normalized.strip():
+        return None, ""
+
+    patterns = [
+        # Standard and compact ranges: 2-5 years, 2 - 5 yrs, 2to5 yoe
+        r"(\d{1,2})\s*(?:-|–|—|to)\s*(\d{1,2})\s*(?:years?|yrs?|yr|yoe)\b",
+        # Explicit minimum phrasing
+        r"(?:at least|minimum(?: of)?|minimum|required|requires|need|needs)\s*(\d{1,2})\+?\s*(?:years?|yrs?|yr|yoe)\b",
+        # Plus-style forms with/without spaces/units: 2+, 2 +, 2+yrs, 2 + yrs
+        r"(\d{1,2})\s*\+\s*(?:years?|yrs?|yr|yoe)?\b",
+        r"(\d{1,2})\+\s*(?:years?|yrs?|yr|yoe)\b",
+        # Hyphen-only minimum shorthand: 2- years, 2 - years, 2-yr
+        r"(\d{1,2})\s*-\s*(?:years?|yrs?|yr|yoe)\b",
+        r"(\d{1,2})\s*(?:years?|yrs?|yr|yoe)\b(?:\s+of)?\s+experience",
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, normalized)
+        if not match:
+            continue
+        groups = [int(g) for g in match.groups() if g is not None]
+        if not groups:
+            continue
+        return min(groups), match.group(0)
+    return None, ""
+
+
+def _job_exceeds_experience_limit(job_details: Dict[str, Any]) -> tuple[bool, str]:
+    max_allowed = int(getattr(config, "SCORING_MAX_ALLOWED_MIN_EXPERIENCE_YEARS", 2))
+    if max_allowed <= 0:
+        return False, ""
+
+    searchable_text = "\n".join(
+        [
+            str(job_details.get("job_title") or ""),
+            str(job_details.get("description") or ""),
+            str(job_details.get("level") or ""),
+        ]
+    )
+    min_years, matched_text = _parse_min_years_requirement(searchable_text)
+    if min_years is None:
+        return False, ""
+    return min_years > max_allowed, matched_text
 
 def format_resume_to_text(resume_data: Dict[str, Any]) -> str:
     """
@@ -101,14 +243,104 @@ def format_resume_to_text(resume_data: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def get_resume_score_from_ai(resume_text: str, job_details: Dict[str, Any]) -> Optional[int]:
+def _normalize_experience_required(raw_value: Any) -> str:
+    text = str(raw_value or "").strip()
+    if not text:
+        return "Not stated"
+
+    normalized = re.sub(r"\s+", " ", text.lower()).strip()
+    if re.search(r"\b(fresher|entry[-\s]?level|no experience)\b", normalized):
+        return "0 years"
+
+    patterns: list[tuple[str, str]] = [
+        (r"(\d{1,2})\s*(?:-|–|—|to)\s*(\d{1,2})\s*(?:years?|yrs?|yr|yoe)?\b", "range"),
+        (r"(\d{1,2})\s*\+(?:\s*(?:years?|yrs?|yr|yoe))?(?=\D|$)", "plus"),
+        (r"(\d{1,2})\s*-\s*(?:years?|yrs?|yr|yoe)\b", "plus"),
+        (r"(?:at least|minimum(?: of)?|minimum|required|requires|need|needs)\s*(\d{1,2})\s*(?:years?|yrs?|yr|yoe)?\b", "plus"),
+        (r"\b(\d{1,2})\s*(?:years?|yrs?|yr|yoe)\b", "exact"),
+    ]
+    for pattern, mode in patterns:
+        match = re.search(pattern, normalized)
+        if not match:
+            continue
+        numbers = [int(group) for group in match.groups() if group is not None]
+        if not numbers:
+            continue
+        if mode == "range" and len(numbers) >= 2:
+            low, high = min(numbers), max(numbers)
+            return f"{low}-{high} years"
+        if mode == "plus":
+            return f"{numbers[0]}+ years"
+        return f"{numbers[0]} years"
+
+    return "Not stated"
+
+
+def _parse_score_and_experience(raw_response: str) -> tuple[Optional[int], str]:
+    text = str(raw_response or "").strip()
+    if not text:
+        return None, "Not stated"
+
+    parsed_score: Optional[int] = None
+    parsed_experience = "Not stated"
+
+    # Remove markdown fences if model wraps JSON in ```json ... ```
+    fence_match = re.search(r"```(?:json)?\s*([\s\S]*?)```", text, flags=re.IGNORECASE)
+    if fence_match:
+        text = fence_match.group(1).strip()
+
+    json_candidate = text
+    object_match = re.search(r"\{[\s\S]*\}", text)
+    if object_match:
+        json_candidate = object_match.group(0)
+
+    parsed_obj: Dict[str, Any] = {}
+    try:
+        maybe_obj = json.loads(json_candidate)
+        if isinstance(maybe_obj, dict):
+            parsed_obj = maybe_obj
+    except Exception:
+        parsed_obj = {}
+
+    if parsed_obj:
+        score_candidate = parsed_obj.get("score")
+        if score_candidate is None:
+            score_candidate = parsed_obj.get("resume_score")
+        if score_candidate is None:
+            score_candidate = parsed_obj.get("match_score")
+        try:
+            parsed_score = int(str(score_candidate).strip()) if score_candidate is not None else None
+        except Exception:
+            parsed_score = None
+
+        experience_candidate = (
+            parsed_obj.get("experience_required")
+            or parsed_obj.get("required_experience")
+            or parsed_obj.get("experience")
+            or ""
+        )
+        parsed_experience = _normalize_experience_required(experience_candidate)
+
+    if parsed_score is None:
+        number_match = re.search(r"\b(\d{1,3})\b", text)
+        if number_match:
+            try:
+                parsed_score = int(number_match.group(1))
+            except Exception:
+                parsed_score = None
+
+    return parsed_score, parsed_experience
+
+
+def get_resume_score_from_ai(resume_text: str, job_details: Dict[str, Any]) -> tuple[Optional[int], str]:
     """
     Sends resume and job details to Gemini to get a suitability score.
-    Returns the score as an integer (0-100) or None if scoring fails.
+    Returns (score, experience_required).
+    score is an integer (0-100) or None if scoring fails.
     """
     if not resume_text or not job_details or not job_details.get('description'):
         logging.warning(f"Missing resume text or job description for job_id {job_details.get('job_id')}. Skipping scoring.")
-        return None
+        return None, "Not stated"
 
     job_company = job_details.get('company', 'N/A')
     job_title = job_details.get('job_title', 'N/A')
@@ -147,8 +379,25 @@ def get_resume_score_from_ai(resume_text: str, job_details: Dict[str, Any]) -> O
     - Give more weight to recent and directly relevant experience/projects than to minor mentions.
     - Do not penalize for missing skills that are clearly optional or nice-to-have unless the JD strongly emphasizes them.
     - Do not output any explanation.
-    - Return exactly one integer between 0 and 100.
-    - Return only the integer, with no words or punctuation.
+    - Return JSON only, with no extra text.
+    - Do not default to 85. Use the full range when evidence supports it.
+    - If major required skills are missing, score should usually be below 75.
+    - If title + skills + experience align strongly with direct evidence, score should usually be 85+.
+
+    Internal scoring method (do this mentally):
+    - Title/Seniority fit: 20%
+    - Hard-skill and stack fit: 35%
+    - Relevant work experience evidence: 30%
+    - Project/domain relevance: 15%
+    - Apply penalty of 5-20 points for clear must-have gaps.
+
+    Also extract the explicit experience requirement from the job description.
+    Normalize experience_required to one of these forms when possible:
+    - "X+ years"
+    - "X-Y years"
+    - "X years"
+    - "Not stated" when not clearly present.
+    Use numbers only; don't write words like "two".
 
     --- RESUME ---
     {resume_text}
@@ -162,29 +411,124 @@ def get_resume_score_from_ai(resume_text: str, job_details: Dict[str, Any]) -> O
     {job_description}
     --- END JOB DESCRIPTION ---
 
-    Score (0–100):
+    Output format (strict JSON, no markdown):
+    {{"score": <integer 0-100>, "experience_required": "<normalized text>"}}
     """
 
-    try:
-        logging.info(f"Requesting score for job_id: {job_details.get('job_id')}")
-        score_text = primary_client.generate_content(
-            prompt=prompt,
-        )
+    strict_system_prompt = (
+        "You are a scoring function. Return only JSON with keys "
+        "'score' (integer 0-100) and 'experience_required' (string). "
+        "No explanation, no markdown, no extra keys."
+    )
+    use_direct_sarvam = bool(
+        config.SCORING_USE_DIRECT_SARVAM
+        and "sarvam" in str(config.SCORING_LLM_MODEL).lower()
+    )
 
-        # Attempt to parse the score
-        score = int(score_text.strip())
-        if 0 <= score <= 100:
-            logging.info(f"Received score {score} for job_id: {job_details.get('job_id')}")
-            return score
-        else:
-            logging.warning(f"Received score out of range ({score}) for job_id: {job_details.get('job_id')}. Raw response: '{score_text}'")
-            return None
-    except ValueError:
-        logging.error(f"Could not parse integer score from LLM response for job_id: {job_details.get('job_id')}. Raw response: '{score_text}'")
-        return None
-    except Exception as e:
-        logging.error(f"Error calling LLM API for job_id {job_details.get('job_id')}: {e}")
-        return None
+    last_raw_response = ""
+    primary_reasoning = str(getattr(config, "SCORING_REASONING_EFFORT", "medium")).strip().lower()
+    fallback_reasoning = str(getattr(config, "SCORING_FALLBACK_REASONING_EFFORT", "low")).strip().lower()
+    max_tokens = int(getattr(config, "SCORING_SARVAM_MAX_TOKENS", 1024))
+    for attempt in range(1, 4):
+        try:
+            logging.info(
+                "Requesting score for job_id: %s (attempt %s/3)",
+                job_details.get('job_id'),
+                attempt,
+            )
+            if use_direct_sarvam:
+                score_text = _request_score_with_sarvam_direct(
+                    prompt=prompt,
+                    system_prompt=strict_system_prompt,
+                    reasoning_effort=primary_reasoning,
+                    max_tokens=max_tokens,
+                    log_reasoning_trace=True,
+                )
+            else:
+                score_text = scoring_client.generate_content(
+                    prompt=prompt,
+                    system_prompt=strict_system_prompt,
+                    temperature=0,
+                )
+            last_raw_response = str(score_text or "").strip()
+
+            if not last_raw_response:
+                if use_direct_sarvam and fallback_reasoning != primary_reasoning:
+                    logging.info(
+                        "Retrying job_id %s immediately with fallback reasoning=%s.",
+                        job_details.get('job_id'),
+                        fallback_reasoning,
+                    )
+                    score_text = _request_score_with_sarvam_direct(
+                        prompt=prompt,
+                        system_prompt=strict_system_prompt,
+                        reasoning_effort=fallback_reasoning,
+                        max_tokens=max_tokens,
+                        log_reasoning_trace=False,
+                    )
+                    last_raw_response = str(score_text or "").strip()
+                    if last_raw_response:
+                        logging.info(
+                            "Fallback reasoning produced output for job_id %s on attempt %s/3.",
+                            job_details.get('job_id'),
+                            attempt,
+                        )
+                        score, experience_required = _parse_score_and_experience(last_raw_response)
+                        if score is not None and 0 <= score <= 100:
+                            logging.info(
+                                "Received score %s for job_id: %s (experience_required=%s)",
+                                score,
+                                job_details.get('job_id'),
+                                experience_required,
+                            )
+                            return score, experience_required
+                logging.warning(
+                    "Empty score response for job_id %s on attempt %s/3.",
+                    job_details.get('job_id'),
+                    attempt,
+                )
+                continue
+
+            score, experience_required = _parse_score_and_experience(last_raw_response)
+            if score is None:
+                logging.warning(
+                    "No integer score found in response for job_id %s on attempt %s/3. Raw response: %r",
+                    job_details.get('job_id'),
+                    attempt,
+                    last_raw_response,
+                )
+                continue
+
+            if 0 <= score <= 100:
+                logging.info(
+                    "Received score %s for job_id: %s (experience_required=%s)",
+                    score,
+                    job_details.get('job_id'),
+                    experience_required,
+                )
+                return score, experience_required
+
+            logging.warning(
+                "Received score out of range (%s) for job_id %s on attempt %s/3. Raw response: %r",
+                score,
+                job_details.get('job_id'),
+                attempt,
+                last_raw_response,
+            )
+        except Exception as e:
+            logging.error(
+                "Error calling LLM API for job_id %s on attempt %s/3: %s",
+                job_details.get('job_id'),
+                attempt,
+                e,
+            )
+
+    logging.error(
+        "Could not parse integer score from LLM response for job_id %s after retries. Last raw response: %r",
+        job_details.get('job_id'),
+        last_raw_response,
+    )
+    return None, "Not stated"
 
 
 def extract_text_from_pdf_url(pdf_url: str) -> Optional[str]:
@@ -239,6 +583,7 @@ def rescore_jobs_with_custom_resume():
     logging.info(f"Processing {len(jobs_to_rescore)} jobs for re-scoring...")
     successful_rescores = 0
     failed_rescores = 0
+    skipped_for_experience = 0
 
     for i, job in enumerate(jobs_to_rescore):
         job_id = job.get('job_id')
@@ -251,6 +596,18 @@ def rescore_jobs_with_custom_resume():
             continue
 
         logging.info(f"--- Re-scoring Job {i+1}/{len(jobs_to_rescore)} (ID: {job_id}) ---")
+        exceeds_limit, matched_requirement = _job_exceeds_experience_limit(job)
+        if exceeds_limit:
+            max_allowed = int(getattr(config, "SCORING_MAX_ALLOWED_MIN_EXPERIENCE_YEARS", 2))
+            logging.info(
+                "Skipping re-scoring for job_id %s due to experience requirement above %s years (matched: %s).",
+                job_id,
+                max_allowed,
+                matched_requirement or "not available",
+            )
+            failed_rescores += 1
+            skipped_for_experience += 1
+            continue
 
         custom_resume_text = None
 
@@ -278,10 +635,15 @@ def rescore_jobs_with_custom_resume():
             continue
         
         logging.debug(f"Custom resume text for job {job_id} (first 200 chars): {custom_resume_text[:200]}")
-        score = get_resume_score_from_ai(custom_resume_text, job)
+        score, experience_required = get_resume_score_from_ai(custom_resume_text, job)
 
         if score is not None:
-            if supabase_utils.update_job_score(job_id, score, resume_score_stage="custom"):
+            if supabase_utils.update_job_score(
+                job_id,
+                score,
+                resume_score_stage="custom",
+                experience_required=experience_required,
+            ):
                 successful_rescores += 1
             else:
                 failed_rescores += 1 
@@ -296,6 +658,7 @@ def rescore_jobs_with_custom_resume():
     logging.info("--- Job Re-scoring Finished ---")
     logging.info(f"Successfully re-scored: {successful_rescores}")
     logging.info(f"Failed/Skipped re-scores: {failed_rescores}")
+    logging.info(f"Skipped re-scores due to experience limit: {skipped_for_experience}")
     logging.info(f"Total re-scoring time: {rescore_end_time - rescore_start_time:.2f} seconds")
 
 # --- Main Execution ---
@@ -303,6 +666,13 @@ def rescore_jobs_with_custom_resume():
 def main():
     """Main function to score jobs based on the target resume."""
     logging.info("--- Starting Job Scoring Script ---")
+    logging.info(
+        "Scoring model configured as: %s%s%s | reasoning=%s",
+        config.SCORING_LLM_MODEL,
+        f" (api_base={config.SCORING_LLM_API_BASE})" if config.SCORING_LLM_API_BASE else "",
+        " [direct Sarvam API]" if config.SCORING_USE_DIRECT_SARVAM and "sarvam" in str(config.SCORING_LLM_MODEL).lower() else "",
+        getattr(config, "SCORING_REASONING_EFFORT", "default"),
+    )
     overall_start_time = time.time()
 
     # --- Phase 1: Initial Scoring with Default Resume ---
@@ -340,6 +710,7 @@ def main():
             logging.info(f"Processing {len(jobs_to_score_initially)} jobs for initial scoring...")
             successful_initial_scores = 0
             failed_initial_scores = 0
+            skipped_for_experience = 0
 
             # 4. Loop Through Jobs and Score Them
             for i, job in enumerate(jobs_to_score_initially):
@@ -350,10 +721,27 @@ def main():
                     continue
 
                 logging.info(f"--- Initial Scoring Job {i+1}/{len(jobs_to_score_initially)} (ID: {job_id}) ---")
-                score = get_resume_score_from_ai(default_resume_text, job)
+                exceeds_limit, matched_requirement = _job_exceeds_experience_limit(job)
+                if exceeds_limit:
+                    max_allowed = int(getattr(config, "SCORING_MAX_ALLOWED_MIN_EXPERIENCE_YEARS", 2))
+                    logging.info(
+                        "Skipping initial scoring for job_id %s due to experience requirement above %s years (matched: %s).",
+                        job_id,
+                        max_allowed,
+                        matched_requirement or "not available",
+                    )
+                    failed_initial_scores += 1
+                    skipped_for_experience += 1
+                    continue
+                score, experience_required = get_resume_score_from_ai(default_resume_text, job)
 
                 if score is not None:
-                    if supabase_utils.update_job_score(job_id, score, resume_score_stage="initial"):
+                    if supabase_utils.update_job_score(
+                        job_id,
+                        score,
+                        resume_score_stage="initial",
+                        experience_required=experience_required,
+                    ):
                         successful_initial_scores += 1
                     else:
                         failed_initial_scores += 1
@@ -368,6 +756,7 @@ def main():
             logging.info("--- Initial Scoring Phase Finished ---")
             logging.info(f"Successfully initially scored: {successful_initial_scores}")
             logging.info(f"Failed/Skipped initial scores: {failed_initial_scores}")
+            logging.info(f"Skipped initial scores due to experience limit: {skipped_for_experience}")
             logging.info(f"Total initial scoring time: {initial_score_end_time - initial_score_start_time:.2f} seconds")
 
     # # --- Phase 2: Re-scoring with Custom Resumes ---
@@ -379,8 +768,8 @@ def main():
 
 
 if __name__ == "__main__":
-    if not config.LLM_API_KEY:
-        logging.error("LLM_API_KEY environment variable not set. (Also accepts GEMINI_API_KEY / GEMINI_FIRST_API_KEY)")
+    if not config.SCORING_LLM_API_KEY:
+        logging.error("No scoring API key configured. Set SCORING_LLM_API_KEY or SARVAM_API_KEY.")
     elif not config.SUPABASE_URL or not config.SUPABASE_SERVICE_ROLE_KEY:
         logging.error("Supabase URL or Key environment variable not set.")
     else:
