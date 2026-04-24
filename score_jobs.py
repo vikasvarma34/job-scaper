@@ -44,6 +44,26 @@ def _extract_chat_message_content(message: Any) -> str:
     return str(message or "").strip()
 
 
+def _looks_like_education_years(text: str) -> bool:
+    normalized = re.sub(r"\s+", " ", str(text or "").lower()).strip()
+    if not normalized:
+        return False
+
+    education_keywords = (
+        "education",
+        "degree",
+        "degrees",
+        "academic",
+        "school",
+        "college",
+        "university",
+        "graduation",
+        "study",
+        "studies",
+    )
+    return any(keyword in normalized for keyword in education_keywords)
+
+
 def _request_score_with_sarvam_direct(
     prompt: str,
     system_prompt: str,
@@ -111,52 +131,6 @@ def _request_score_with_sarvam_direct(
         )
     return content.strip()
 
-
-def _parse_min_years_requirement(text: str) -> tuple[Optional[int], str]:
-    normalized = str(text or "").lower()
-    if not normalized.strip():
-        return None, ""
-
-    patterns = [
-        # Standard and compact ranges: 2-5 years, 2 - 5 yrs, 2to5 yoe
-        r"(\d{1,2})\s*(?:-|–|—|to)\s*(\d{1,2})\s*(?:years?|yrs?|yr|yoe)\b",
-        # Explicit minimum phrasing
-        r"(?:at least|minimum(?: of)?|minimum|required|requires|need|needs)\s*(\d{1,2})\+?\s*(?:years?|yrs?|yr|yoe)\b",
-        # Plus-style forms with/without spaces/units: 2+, 2 +, 2+yrs, 2 + yrs
-        r"(\d{1,2})\s*\+\s*(?:years?|yrs?|yr|yoe)?\b",
-        r"(\d{1,2})\+\s*(?:years?|yrs?|yr|yoe)\b",
-        # Hyphen-only minimum shorthand: 2- years, 2 - years, 2-yr
-        r"(\d{1,2})\s*-\s*(?:years?|yrs?|yr|yoe)\b",
-        r"(\d{1,2})\s*(?:years?|yrs?|yr|yoe)\b(?:\s+of)?\s+experience",
-    ]
-
-    for pattern in patterns:
-        match = re.search(pattern, normalized)
-        if not match:
-            continue
-        groups = [int(g) for g in match.groups() if g is not None]
-        if not groups:
-            continue
-        return min(groups), match.group(0)
-    return None, ""
-
-
-def _job_exceeds_experience_limit(job_details: Dict[str, Any]) -> tuple[bool, str]:
-    max_allowed = int(getattr(config, "SCORING_MAX_ALLOWED_MIN_EXPERIENCE_YEARS", 2))
-    if max_allowed <= 0:
-        return False, ""
-
-    searchable_text = "\n".join(
-        [
-            str(job_details.get("job_title") or ""),
-            str(job_details.get("description") or ""),
-            str(job_details.get("level") or ""),
-        ]
-    )
-    min_years, matched_text = _parse_min_years_requirement(searchable_text)
-    if min_years is None:
-        return False, ""
-    return min_years > max_allowed, matched_text
 
 def format_resume_to_text(resume_data: Dict[str, Any]) -> str:
     """
@@ -249,6 +223,8 @@ def _normalize_experience_required(raw_value: Any) -> str:
         return "Not stated"
 
     normalized = re.sub(r"\s+", " ", text.lower()).strip()
+    if _looks_like_education_years(normalized) and not re.search(r"\b(experience|work|yoe)\b", normalized):
+        return "Not stated"
     if re.search(r"\b(fresher|entry[-\s]?level|no experience)\b", normalized):
         return "0 years"
 
@@ -383,6 +359,9 @@ def get_resume_score_from_ai(resume_text: str, job_details: Dict[str, Any]) -> t
     - Do not default to 85. Use the full range when evidence supports it.
     - If major required skills are missing, score should usually be below 75.
     - If title + skills + experience align strongly with direct evidence, score should usually be 85+.
+    - When extracting experience_required, ignore education years, degree duration, graduation years, or other academic timelines.
+    - Only return work-experience requirements that are explicit in the job description.
+    - If the JD only mentions education years or no clear work-experience requirement, return "Not stated".
 
     Internal scoring method (do this mentally):
     - Title/Seniority fit: 20%
@@ -583,7 +562,7 @@ def rescore_jobs_with_custom_resume():
     logging.info(f"Processing {len(jobs_to_rescore)} jobs for re-scoring...")
     successful_rescores = 0
     failed_rescores = 0
-    skipped_for_experience = 0
+    logging.info("Experience prefilter disabled for re-scoring; every job with a description will be sent to the LLM.")
 
     for i, job in enumerate(jobs_to_rescore):
         job_id = job.get('job_id')
@@ -596,18 +575,6 @@ def rescore_jobs_with_custom_resume():
             continue
 
         logging.info(f"--- Re-scoring Job {i+1}/{len(jobs_to_rescore)} (ID: {job_id}) ---")
-        exceeds_limit, matched_requirement = _job_exceeds_experience_limit(job)
-        if exceeds_limit:
-            max_allowed = int(getattr(config, "SCORING_MAX_ALLOWED_MIN_EXPERIENCE_YEARS", 2))
-            logging.info(
-                "Skipping re-scoring for job_id %s due to experience requirement above %s years (matched: %s).",
-                job_id,
-                max_allowed,
-                matched_requirement or "not available",
-            )
-            failed_rescores += 1
-            skipped_for_experience += 1
-            continue
 
         custom_resume_text = None
 
@@ -658,7 +625,6 @@ def rescore_jobs_with_custom_resume():
     logging.info("--- Job Re-scoring Finished ---")
     logging.info(f"Successfully re-scored: {successful_rescores}")
     logging.info(f"Failed/Skipped re-scores: {failed_rescores}")
-    logging.info(f"Skipped re-scores due to experience limit: {skipped_for_experience}")
     logging.info(f"Total re-scoring time: {rescore_end_time - rescore_start_time:.2f} seconds")
 
 # --- Main Execution ---
@@ -701,6 +667,7 @@ def main():
         # 2. Format Resume to Text
         default_resume_text = format_resume_to_text(default_resume_data)
         logging.info("Default resume data formatted to text.")
+        logging.info("Experience prefilter disabled for initial scoring; every job with a description will be sent to the LLM.")
 
         # 3. Fetch Jobs to Score
         jobs_to_score_initially = supabase_utils.get_jobs_to_score(config.JOBS_TO_SCORE_PER_RUN)
@@ -710,7 +677,6 @@ def main():
             logging.info(f"Processing {len(jobs_to_score_initially)} jobs for initial scoring...")
             successful_initial_scores = 0
             failed_initial_scores = 0
-            skipped_for_experience = 0
 
             # 4. Loop Through Jobs and Score Them
             for i, job in enumerate(jobs_to_score_initially):
@@ -721,18 +687,6 @@ def main():
                     continue
 
                 logging.info(f"--- Initial Scoring Job {i+1}/{len(jobs_to_score_initially)} (ID: {job_id}) ---")
-                exceeds_limit, matched_requirement = _job_exceeds_experience_limit(job)
-                if exceeds_limit:
-                    max_allowed = int(getattr(config, "SCORING_MAX_ALLOWED_MIN_EXPERIENCE_YEARS", 2))
-                    logging.info(
-                        "Skipping initial scoring for job_id %s due to experience requirement above %s years (matched: %s).",
-                        job_id,
-                        max_allowed,
-                        matched_requirement or "not available",
-                    )
-                    failed_initial_scores += 1
-                    skipped_for_experience += 1
-                    continue
                 score, experience_required = get_resume_score_from_ai(default_resume_text, job)
 
                 if score is not None:
@@ -756,7 +710,6 @@ def main():
             logging.info("--- Initial Scoring Phase Finished ---")
             logging.info(f"Successfully initially scored: {successful_initial_scores}")
             logging.info(f"Failed/Skipped initial scores: {failed_initial_scores}")
-            logging.info(f"Skipped initial scores due to experience limit: {skipped_for_experience}")
             logging.info(f"Total initial scoring time: {initial_score_end_time - initial_score_start_time:.2f} seconds")
 
     # # --- Phase 2: Re-scoring with Custom Resumes ---

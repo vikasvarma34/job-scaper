@@ -17,6 +17,13 @@
         <div class="topbar-actions">
           <a class="secondary-button link-button" href="#jobs-browser">Browse Jobs</a>
           <button id="refresh-button" class="secondary-button">Refresh Data</button>
+          <div class="provider-switch" aria-label="Resume generation provider">
+            <span class="provider-switch-label">Resume AI</span>
+            <div class="provider-switch-group" role="group" aria-label="Choose resume generation provider">
+              <button type="button" class="provider-option" data-resume-provider="gemini">Gemini</button>
+              <button type="button" class="provider-option" data-resume-provider="sarvam">Sarvam</button>
+            </div>
+          </div>
         </div>
       </header>
 
@@ -247,6 +254,7 @@
       const clearScoresButton = document.getElementById("clear-scores-button");
       const stopTaskButton = document.getElementById("stop-task-button");
       const saveLogsButton = document.getElementById("save-logs-button");
+      const resumeProviderButtons = document.querySelectorAll("[data-resume-provider]");
       const jobsList = document.getElementById("jobs-list");
       const jobsError = document.getElementById("jobs-error");
       const jobsSummary = document.getElementById("jobs-summary");
@@ -286,6 +294,34 @@
       let refreshTimer = null;
       const AUTO_SCROLL_THRESHOLD_PX = 20;
       let isLogAutoScrollEnabled = true;
+      const RESUME_PROVIDER_STORAGE_KEY = "resume-generation-provider";
+      const SUPPORTED_RESUME_PROVIDERS = new Set(["gemini", "sarvam"]);
+
+      function getSelectedResumeProvider() {
+        const stored = String(window.localStorage.getItem(RESUME_PROVIDER_STORAGE_KEY) || "").trim().toLowerCase();
+        if (SUPPORTED_RESUME_PROVIDERS.has(stored)) {
+          return stored;
+        }
+        return "gemini";
+      }
+
+      function setSelectedResumeProvider(provider) {
+        const normalized = SUPPORTED_RESUME_PROVIDERS.has(String(provider || "").trim().toLowerCase())
+          ? String(provider).trim().toLowerCase()
+          : "gemini";
+        window.localStorage.setItem(RESUME_PROVIDER_STORAGE_KEY, normalized);
+        updateResumeProviderUI();
+        return normalized;
+      }
+
+      function updateResumeProviderUI() {
+        const selected = getSelectedResumeProvider();
+        resumeProviderButtons.forEach((button) => {
+          const isActive = String(button.dataset.resumeProvider || "").trim().toLowerCase() === selected;
+          button.classList.toggle("active", isActive);
+          button.setAttribute("aria-pressed", String(isActive));
+        });
+      }
 
       function normalizeStatus(job) {
         return String(job.status || "").trim().toLowerCase();
@@ -927,6 +963,7 @@
       async function runAction(action) {
         const jobId = jobIdInput.value.trim();
         const emailOverride = emailOverrideInput.value.trim();
+        const resumeProvider = getSelectedResumeProvider();
         let count = "";
 
         if (action === "generate_job" && !jobId) {
@@ -980,6 +1017,7 @@
         if (emailOverride) {
           formData.append("email_override", emailOverride);
         }
+        formData.append("resume_provider", resumeProvider);
         if (count) {
           formData.append("count", count);
         }
@@ -1000,6 +1038,12 @@
 
       document.querySelectorAll(".action-button[data-action]").forEach((button) => {
         button.addEventListener("click", () => runAction(button.dataset.action));
+      });
+
+      resumeProviderButtons.forEach((button) => {
+        button.addEventListener("click", () => {
+          setSelectedResumeProvider(button.dataset.resumeProvider || "gemini");
+        });
       });
 
       document.querySelectorAll("[data-quick-filter]").forEach((button) => {
@@ -1033,6 +1077,7 @@
       searchInput.addEventListener("input", () => renderJobs(allJobs));
       statusFilter.addEventListener("change", () => renderJobs(allJobs));
 
+      updateResumeProviderUI();
       renderState(initialState);
       renderStats(initialStats);
       renderJobs(allJobs);

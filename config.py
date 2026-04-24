@@ -29,6 +29,11 @@ LLM_API_KEY = os.environ.get("LLM_API_KEY") or os.environ.get("GEMINI_API_KEY") 
 # Use any model supported by LiteLLM (gemini, openai/gpt-4o-mini, groq/llama-3.3-70b-versatile)
 # Full list of supported models & naming: https://docs.litellm.ai/docs/providers
 LLM_MODEL = os.environ.get("LLM_MODEL", "gemini/gemini-3.1-pro-preview")
+LLM_API_BASE = os.environ.get("LLM_API_BASE")
+if not LLM_API_BASE and "sarvam" in str(LLM_MODEL).lower():
+    LLM_API_BASE = os.environ.get("SARVAM_API_BASE", "https://api.sarvam.ai/v1")
+if "sarvam" in str(LLM_MODEL).lower() and not os.environ.get("LLM_API_KEY"):
+    LLM_API_KEY = os.environ.get("SARVAM_API_KEY") or LLM_API_KEY
 
 # Optional: route scoring to a different provider/model than resume/cover-letter generation.
 # Sarvam chat completion is OpenAI-compatible, so use:
@@ -58,8 +63,11 @@ SCORING_USE_DIRECT_SARVAM = str(os.environ.get("SCORING_USE_DIRECT_SARVAM", ""))
 if "sarvam" in str(SCORING_LLM_MODEL).lower() and not os.environ.get("SCORING_USE_DIRECT_SARVAM"):
     SCORING_USE_DIRECT_SARVAM = True
 SCORING_SARVAM_MAX_TOKENS = int(os.environ.get("SCORING_SARVAM_MAX_TOKENS", "4096"))
-# Scoring gate: skip jobs that clearly require more than this many years.
-# 2 means allow 0/1/2 years (including "2+"), skip 3+ roles.
+# Sarvam docs document a 128K context window for sarvam-105b, but no separate
+# hard output-token ceiling. Use a high resume-generation cap to avoid truncation.
+LLM_SARVAM_MAX_TOKENS = int(os.environ.get("LLM_SARVAM_MAX_TOKENS", "32768"))
+# Legacy experience gate value.
+# The scoring pipeline now keeps jobs instead of skipping them on regex-based experience matches.
 SCORING_MAX_ALLOWED_MIN_EXPERIENCE_YEARS = int(os.environ.get("SCORING_MAX_ALLOWED_MIN_EXPERIENCE_YEARS", "2"))
 SCORING_REASONING_EFFORT = str(os.environ.get("SCORING_REASONING_EFFORT", "medium")).strip().lower()
 SCORING_FALLBACK_REASONING_EFFORT = str(os.environ.get("SCORING_FALLBACK_REASONING_EFFORT", "low")).strip().lower()

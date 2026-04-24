@@ -2,7 +2,6 @@ import argparse
 import logging
 import supabase_utils
 import config # Assuming config holds necessary configurations like a default email
-from pydantic import ValidationError # Import pydantic
 from typing import Dict, Any
 import json # Import json for parsing LLM output
 import pdf_generator 
@@ -10,6 +9,7 @@ import re
 import asyncio 
 import math
 import resume_validator
+import requests
 from llm_client import primary_client
 from models import (
     Resume, SummaryOutput, SkillsOutput, SingleExperienceOutput,
@@ -79,6 +79,225 @@ def _postprocess_keyword_plan(plan: ATSKeywordPlan) -> ATSKeywordPlan:
         hard_skills=_clean(list(plan.hard_skills), blocklist=hard_blocklist, max_items=16),
         soft_skills=_clean(list(plan.soft_skills), blocklist=soft_blocklist, max_items=10),
     )
+
+
+def _extract_json_payload(raw_text: Any) -> str:
+    """
+    Strip markdown fences and keep the most likely JSON object payload.
+    This makes structured outputs resilient when the model wraps JSON in ```json fences.
+    """
+    text = str(raw_text or "").strip()
+    if not text:
+        return text
+
+    fence_match = re.search(r"```(?:json)?\s*([\s\S]*?)```", text, flags=re.IGNORECASE)
+    if fence_match:
+        text = fence_match.group(1).strip()
+
+    object_match = re.search(r"\{[\s\S]*\}", text)
+    if object_match:
+        return object_match.group(0).strip()
+
+    return text
+
+
+def _is_sarvam_resume_model() -> bool:
+    return "sarvam" in str(getattr(config, "LLM_MODEL", "")).lower()
+
+
+def _sarvam_model_id(raw_model: str) -> str:
+    cleaned = str(raw_model or "").strip()
+    if "/" in cleaned:
+        provider, model_id = cleaned.split("/", 1)
+        if provider.lower() == "openai":
+            return model_id.strip() or "sarvam-105b"
+    return cleaned or "sarvam-105b"
+
+
+def _extract_chat_message_content(message: Any) -> str:
+    if isinstance(message, str):
+        return message.strip()
+    if isinstance(message, list):
+        parts: list[str] = []
+        for item in message:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                text = item.get("text") or item.get("content") or ""
+                if text:
+                    parts.append(str(text))
+        return "\n".join(part for part in parts if str(part).strip()).strip()
+    if isinstance(message, dict):
+        return str(message.get("content") or message.get("text") or "").strip()
+    return str(message or "").strip()
+
+
+def _request_sarvam_direct(
+    prompt: str,
+    system_prompt: str,
+    *,
+    temperature: float = RESUME_GENERATION_TEMPERATURE,
+    max_tokens: int | None = None,
+) -> str:
+    sarvam_key = str(config.LLM_API_KEY or os.environ.get("SARVAM_API_KEY") or "").strip()
+    if not sarvam_key:
+        raise RuntimeError("SARVAM_API_KEY is required for Sarvam resume generation.")
+
+    base_url = str(
+        getattr(config, "LLM_API_BASE", None)
+        or os.environ.get("SARVAM_API_BASE")
+        or "https://api.sarvam.ai/v1"
+    ).rstrip("/")
+    endpoint = f"{base_url}/chat/completions"
+    payload = {
+        "model": _sarvam_model_id(config.LLM_MODEL),
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": temperature,
+        "max_tokens": max(64, int(max_tokens or getattr(config, "LLM_SARVAM_MAX_TOKENS", 32768))),
+    }
+    headers = {
+        "Content-Type": "application/json",
+        "api-subscription-key": sarvam_key,
+        "Authorization": f"Bearer {sarvam_key}",
+    }
+
+    response = requests.post(endpoint, json=payload, headers=headers, timeout=90)
+    if not response.ok:
+        body_preview = response.text[:500].strip()
+        raise RuntimeError(f"Sarvam API HTTP {response.status_code}: {body_preview}")
+
+    try:
+        data = response.json()
+    except Exception as exc:
+        raise RuntimeError(f"Sarvam API returned non-JSON response: {exc}") from exc
+
+    choices = data.get("choices") or []
+    if not choices:
+        return ""
+
+    first_choice = choices[0] or {}
+    message = first_choice.get("message") or {}
+    content = _extract_chat_message_content(message.get("content"))
+    if content:
+        return content.strip()
+    if str(first_choice.get("finish_reason") or "").strip().lower() == "length":
+        logging.warning(
+            "Sarvam response hit max_tokens before final answer. Consider increasing LLM_SARVAM_MAX_TOKENS."
+        )
+    return ""
+
+
+def _coerce_description_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, list):
+        parts: list[str] = []
+        for item in value:
+            if isinstance(item, dict):
+                text = item.get("text") or item.get("content") or item.get("description") or ""
+                if isinstance(text, list):
+                    text = _coerce_description_text(text)
+                text = str(text or "").strip()
+            else:
+                text = str(item or "").strip()
+            if text:
+                parts.append(text)
+        return "\n".join(parts).strip()
+    if isinstance(value, dict):
+        return str(value.get("content") or value.get("text") or value.get("description") or "").strip()
+    return str(value or "").strip()
+
+
+def _normalize_resume_rewrite_payload(payload: Any) -> Any:
+    if not isinstance(payload, dict):
+        return payload
+
+    normalized = dict(payload)
+    normalized["header_title"] = str(normalized.get("header_title") or "").strip()
+    normalized["summary"] = _coerce_description_text(normalized.get("summary"))
+    skills = normalized.get("skills") or []
+    if isinstance(skills, list):
+        flattened_skills: list[str] = []
+        for skill in skills:
+            if isinstance(skill, list):
+                flattened_skills.extend(
+                    [
+                        str(item).strip()
+                        for item in skill
+                        if str(item).strip()
+                    ]
+                )
+            else:
+                cleaned = str(skill).strip()
+                if cleaned:
+                    flattened_skills.append(cleaned)
+        normalized["skills"] = flattened_skills
+
+    for section_key in ("experience", "projects"):
+        section_value = normalized.get(section_key)
+        if isinstance(section_value, list):
+            cleaned_items: list[dict[str, Any]] = []
+            for item in section_value:
+                if not isinstance(item, dict):
+                    continue
+                item_copy = dict(item)
+                item_copy["description"] = _coerce_description_text(item_copy.get("description"))
+                cleaned_items.append(item_copy)
+            normalized[section_key] = cleaned_items
+        elif isinstance(section_value, dict):
+            item_copy = dict(section_value)
+            item_copy["description"] = _coerce_description_text(item_copy.get("description"))
+            normalized[section_key] = item_copy
+
+    if isinstance(normalized.get("project"), dict):
+        project_copy = dict(normalized["project"])
+        project_copy["description"] = _coerce_description_text(project_copy.get("description"))
+        normalized["project"] = project_copy
+
+    if isinstance(normalized.get("experience"), dict):
+        experience_copy = dict(normalized["experience"])
+        experience_copy["description"] = _coerce_description_text(experience_copy.get("description"))
+        normalized["experience"] = experience_copy
+
+    return normalized
+
+
+def _parse_structured_json_output(raw_output: Any) -> dict[str, Any]:
+    payload_text = _extract_json_payload(raw_output)
+    parsed = json.loads(payload_text)
+    if not isinstance(parsed, dict):
+        raise ValueError("Structured output did not contain a JSON object.")
+    return parsed
+
+
+def _generate_structured_output(
+    prompt: str,
+    system_prompt: str,
+    response_model: Any,
+    *,
+    temperature: float = RESUME_GENERATION_TEMPERATURE,
+    max_tokens: int | None = None,
+) -> Any:
+    if _is_sarvam_resume_model():
+        raw_output = _request_sarvam_direct(
+            prompt=prompt,
+            system_prompt=system_prompt,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+    else:
+        raw_output = primary_client.generate_content(
+            prompt=prompt,
+            system_prompt=system_prompt,
+            temperature=temperature,
+            response_format=response_model,
+        )
+
+    parsed = _normalize_resume_rewrite_payload(_parse_structured_json_output(raw_output))
+    return response_model.model_validate(parsed)
 
 
 def _sanitize_filename_token(value: Any, default: str = "UNKNOWN") -> str:
@@ -334,14 +553,14 @@ async def generate_keyword_plan_with_llm(
     - Reason privately and output only the final JSON.
     """
 
-    llm_output = primary_client.generate_content(
+    llm_output = _generate_structured_output(
         prompt=prompt,
         system_prompt=system_prompt,
+        response_model=ATSKeywordPlan,
         temperature=RESUME_GENERATION_TEMPERATURE,
-        response_format=ATSKeywordPlan,
     )
-    _log_keyword_plan_response(job_id=job_details.get("job_id"), llm_output=llm_output)
-    return _postprocess_keyword_plan(ATSKeywordPlan.model_validate_json(llm_output))
+    _log_keyword_plan_response(job_id=job_details.get("job_id"), llm_output=llm_output.model_dump_json())
+    return _postprocess_keyword_plan(llm_output)
 
 
 def _apply_two_step_rewrite_to_resume(
@@ -608,13 +827,12 @@ async def rewrite_resume_with_keyword_plan(
     - Reason privately and output only the final JSON.
     """
 
-    llm_output = primary_client.generate_content(
+    return _generate_structured_output(
         prompt=prompt,
         system_prompt=system_prompt,
+        response_model=ATSResumeRewriteOutput,
         temperature=RESUME_GENERATION_TEMPERATURE,
-        response_format=ATSResumeRewriteOutput,
     )
-    return ATSResumeRewriteOutput.model_validate_json(llm_output)
 
 
 async def personalize_resume_with_two_step_ai(
@@ -860,30 +1078,15 @@ async def personalize_section_with_llm(
         # ]
 
         try:
-            llm_output = primary_client.generate_content(
+            llm_output = _generate_structured_output(
                 prompt=prompt,
                 system_prompt=system_prompt,
+                response_model=OutputModel,
                 temperature=RESUME_GENERATION_TEMPERATURE,
-                response_format=OutputModel,
             )
             
             logging.info(f"Received response from LLM for section: {section_name}")
-
-            try:
-                # Validate and parse the JSON output against the Pydantic model
-                parsed_response_model = OutputModel.model_validate_json(llm_output)
-                # Extract the actual content (e.g., the string for summary, list for skills)
-                responses.append(parsed_response_model)
-            except ValidationError as e:
-                logging.error(f"Failed to validate LLM JSON output for {section_name} against schema: {e}")
-                logging.error(f"LLM Raw Output was for {section_name}: {llm_output}")
-                # Fallback: return original content if validation fails
-                return section_content
-            except json.JSONDecodeError as e: # Should be caught by ValidationError mostly, but as a safeguard
-                logging.error(f"Failed to parse LLM JSON output for {section_name}: {e}")
-                logging.error(f"LLM Raw Output was for {section_name}: {llm_output}")
-                return section_content
-
+            responses.append(llm_output)
 
         except Exception as e:
             logging.error(f"Error calling LLM or processing response for section {section_name}: {e}")

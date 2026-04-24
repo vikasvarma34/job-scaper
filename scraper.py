@@ -282,27 +282,10 @@ def _get_experience_year_bounds(description: str | None) -> tuple[int | None, in
 
 def _passes_experience_requirement(description: str | None) -> bool:
     """
-    Hard gate for roles that clearly ask for more experience than the target.
-    Missing or unparseable experience remains allowed.
+    Experience-based prefiltering is disabled so jobs are preserved for LLM scoring.
+    Keep this helper returning True to avoid dropping roles because regex parsing can
+    confuse education years with work-experience requirements.
     """
-    max_allowed_years = int(
-        getattr(
-            config,
-            "LINKEDIN_MAX_ALLOWED_MIN_EXPERIENCE_YEARS",
-            getattr(config, "LINKEDIN_MAX_ALLOWED_EXPERIENCE_YEARS", 0),
-        )
-        or 0
-    )
-    if max_allowed_years <= 0:
-        return True
-
-    min_years, max_years, is_open_ended = _get_experience_year_bounds(description)
-    if min_years is None and max_years is None:
-        return True
-
-    if min_years is not None and min_years > max_allowed_years:
-        return False
-
     return True
 
 

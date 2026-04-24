@@ -23,6 +23,7 @@ import threading
 from typing import Optional, Any, Type
 
 import litellm
+import requests
 from pydantic import BaseModel
 
 import config
@@ -122,8 +123,11 @@ class LLMClient:
         provider = self.model.split("/")[0] if "/" in self.model else self.model.lower()
         if provider == "google":
             provider = "gemini"
+        if "sarvam" in self.model.lower():
+            provider = "sarvam"
         env_var_map = {
             "gemini": "GEMINI_API_KEY",
+            "sarvam": "SARVAM_API_KEY",
             "openai": "OPENAI_API_KEY",
             "anthropic": "ANTHROPIC_API_KEY",
             "groq": "GROQ_API_KEY",
@@ -150,6 +154,82 @@ class LLMClient:
                 f"Daily LLM request budget exceeded ({self.daily_budget} requests). "
                 f"Increase LLM_DAILY_REQUEST_BUDGET or wait for reset."
             )
+
+    @staticmethod
+    def _normalize_message_content(value: Any) -> str:
+        if isinstance(value, str):
+            return value.strip()
+        if isinstance(value, list):
+            parts: list[str] = []
+            for item in value:
+                if isinstance(item, str):
+                    parts.append(item)
+                elif isinstance(item, dict):
+                    text = item.get("text") or item.get("content") or ""
+                    if text:
+                        parts.append(str(text))
+            return "\n".join(part for part in parts if str(part).strip()).strip()
+        if isinstance(value, dict):
+            return str(value.get("content") or value.get("text") or "").strip()
+        return str(value or "").strip()
+
+    @staticmethod
+    def _normalize_sarvam_model(model: str) -> str:
+        cleaned = str(model or "").strip()
+        if "/" in cleaned:
+            provider, model_id = cleaned.split("/", 1)
+            if provider.lower() == "openai":
+                return model_id.strip() or "sarvam-105b"
+        return cleaned or "sarvam-105b"
+
+    def _request_sarvam_direct(
+        self,
+        messages: list[dict[str, str]],
+        model: str,
+        temperature: float,
+    ) -> str:
+        api_key = str(self.api_key or os.environ.get("SARVAM_API_KEY") or "").strip()
+        if not api_key:
+            raise RuntimeError("Sarvam API key is required for Sarvam resume generation.")
+
+        base_url = str(self.api_base or os.environ.get("SARVAM_API_BASE") or "https://api.sarvam.ai/v1").rstrip("/")
+        endpoint = f"{base_url}/chat/completions"
+        payload = {
+            "model": self._normalize_sarvam_model(model),
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": int(os.environ.get("LLM_SARVAM_MAX_TOKENS", str(getattr(config, "LLM_SARVAM_MAX_TOKENS", 32768)))),
+        }
+        headers = {
+            "Content-Type": "application/json",
+            "api-subscription-key": api_key,
+            "Authorization": f"Bearer {api_key}",
+        }
+
+        response = requests.post(endpoint, json=payload, headers=headers, timeout=90)
+        if not response.ok:
+            body_preview = response.text[:500].strip()
+            raise RuntimeError(f"Sarvam API HTTP {response.status_code}: {body_preview}")
+
+        try:
+            data = response.json()
+        except Exception as exc:
+            raise RuntimeError(f"Sarvam API returned non-JSON response: {exc}") from exc
+
+        choices = data.get("choices") or []
+        if not choices:
+            return ""
+
+        first_choice = choices[0] or {}
+        message = first_choice.get("message") or {}
+        content = self._normalize_message_content(message.get("content"))
+        if content:
+            return content.strip()
+        if str(first_choice.get("finish_reason") or "").strip().lower() == "length":
+            logger.warning(
+                "Sarvam response hit max_tokens before final answer. Consider increasing LLM_SARVAM_MAX_TOKENS."
+            )
+        return ""
 
     def generate_content(
         self,
@@ -185,6 +265,7 @@ class LLMClient:
         model = model_override or self.model
         normalized_temperature = temperature
         normalized_reasoning_effort = reasoning_effort
+        is_sarvam_model = "sarvam" in model.lower()
 
         # OpenAI GPT-5 reasoning calls currently require temperature=1.
         # Keep legacy/non-reasoning calls unchanged, but normalize ATS planner-style
@@ -248,29 +329,38 @@ class LLMClient:
                 # Fixed inter-request delay
                 if self.request_delay > 0 and attempt == 0:
                     time.sleep(self.request_delay)
-                    
-                current_model = gemini_pool[pool_index % len(gemini_pool)] if is_dynamic_gemini else model
-                kwargs = base_kwargs.copy()
-                kwargs["model"] = current_model
 
-                logger.debug(f"LLM request attempt {attempt + 1}/{max_attempts} to {current_model}")
-                response = litellm.completion(**kwargs)
+                current_model = gemini_pool[pool_index % len(gemini_pool)] if is_dynamic_gemini else model
+
+                if is_sarvam_model:
+                    logger.debug(f"LLM request attempt {attempt + 1}/{max_attempts} to {current_model} via direct Sarvam API")
+                    content = self._request_sarvam_direct(
+                        messages=messages,
+                        model=current_model,
+                        temperature=normalized_temperature,
+                    )
+                else:
+                    kwargs = base_kwargs.copy()
+                    kwargs["model"] = current_model
+                    logger.debug(f"LLM request attempt {attempt + 1}/{max_attempts} to {current_model}")
+                    response = litellm.completion(**kwargs)
+                    content = self._normalize_message_content(response.choices[0].message.content)
 
                 # Track daily usage
                 self._daily_count += 1
 
-                # Extract text from response
-                content = response.choices[0].message.content
                 if content:
                     return content.strip()
-                else:
-                    logger.warning(f"LLM returned empty content on model {current_model} (attempt {attempt + 1}/{max_attempts}).")
-                    if attempt < max_attempts - 1:
-                        delay = random.uniform(0.8, 2.0)
-                        logger.warning(f"Retrying after empty content in {delay:.1f}s...")
-                        time.sleep(delay)
-                        continue
-                    return ""
+
+                logger.warning(
+                    f"LLM returned empty content on model {current_model} (attempt {attempt + 1}/{max_attempts})."
+                )
+                if attempt < max_attempts - 1:
+                    delay = random.uniform(0.8, 2.0)
+                    logger.warning(f"Retrying after empty content in {delay:.1f}s...")
+                    time.sleep(delay)
+                    continue
+                return ""
 
             except Exception as e:
                 last_exception = e
@@ -334,6 +424,7 @@ def _create_client(
 primary_client = _create_client(
     model=config.LLM_MODEL,
     api_key=config.LLM_API_KEY,
+    api_base=getattr(config, "LLM_API_BASE", None),
 )
 
 # Dedicated scoring client (can be routed to a different provider/model like Sarvam)

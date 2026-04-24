@@ -41,6 +41,11 @@ _task_state = {
 }
 _task_process: subprocess.Popen | None = None
 _stop_requested = False
+_RESUME_PROVIDER_ALIASES = {
+    "gemini": "gemini",
+    "google": "gemini",
+    "sarvam": "sarvam",
+}
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
@@ -115,9 +120,43 @@ def _clear_task_process(process: subprocess.Popen) -> None:
             _task_process = None
 
 
-def _run_command_in_background(label: str, command: list[str]) -> None:
+def _normalize_resume_provider(provider: str | None) -> str:
+    cleaned = str(provider or "").strip().lower()
+    return _RESUME_PROVIDER_ALIASES.get(cleaned, "gemini")
+
+
+def _resume_generation_env_overrides(provider: str | None) -> dict[str, str]:
+    normalized_provider = _normalize_resume_provider(provider)
+    if normalized_provider == "sarvam":
+        sarvam_api_key = str(os.environ.get("SARVAM_API_KEY") or "").strip()
+        if not sarvam_api_key:
+            raise ValueError("SARVAM_API_KEY is required to generate resumes with Sarvam.")
+        return {
+            "LLM_MODEL": "sarvam-105b",
+            "LLM_API_KEY": sarvam_api_key,
+            "LLM_API_BASE": os.environ.get("SARVAM_API_BASE", "https://api.sarvam.ai/v1"),
+        }
+
+    # Use the existing Gemini/default configuration for all other cases.
+    return {
+        "LLM_MODEL": str(config.LLM_MODEL if "gemini" in str(config.LLM_MODEL).lower() else "gemini/gemini-3.1-pro-preview"),
+        "LLM_API_KEY": str(
+            os.environ.get("GEMINI_API_KEY")
+            or os.environ.get("GEMINI_FIRST_API_KEY")
+            or (config.LLM_API_KEY if "gemini" in str(config.LLM_MODEL).lower() else "")
+        ),
+        "LLM_API_BASE": None,
+    }
+
+
+def _run_command_in_background(label: str, command: list[str], env_overrides: dict[str, str | None] | None = None) -> None:
     global _stop_requested
     env = os.environ.copy()
+    for key, value in (env_overrides or {}).items():
+        if value is None:
+            env.pop(key, None)
+        elif value:
+            env[key] = value
     env["PYTHONUNBUFFERED"] = "1"
 
     task_id = str(uuid.uuid4())
@@ -181,41 +220,62 @@ def _build_command(
     count: int | None,
     email_override: str | None = None,
     job_url: str | None = None,
-) -> tuple[str, list[str]]:
+    resume_provider: str | None = None,
+) -> tuple[str, list[str], dict[str, str | None]]:
     python = sys.executable
     cleaned_email_override = str(email_override or "").strip()
+    env_overrides: dict[str, str | None] = {}
+    selected_provider = _normalize_resume_provider(resume_provider)
+    provider_suffix = " [Sarvam]" if selected_provider == "sarvam" else " [Gemini]"
 
     def _append_email_override(command: list[str]) -> list[str]:
         if cleaned_email_override:
             command.extend(["--email-override", cleaned_email_override])
         return command
 
+    def _with_resume_provider(command: list[str]) -> list[str]:
+        provider_overrides = _resume_generation_env_overrides(resume_provider)
+        env_overrides.update(provider_overrides)
+        return command
+
     if action == "scrape":
-        return "Scrape Jobs", [python, "scraper.py"]
+        return "Scrape Jobs", [python, "scraper.py"], {}
     if action == "score":
-        return "Score Jobs", [python, "score_jobs.py"]
+        return "Score Jobs", [python, "score_jobs.py"], {}
     if action == "import_job_url":
         cleaned_job_url = str(job_url or "").strip()
         if not cleaned_job_url:
             raise ValueError("Job URL is required.")
+        command = _with_resume_provider(
+            _append_email_override([python, "job_link_processor.py", "--job-url", cleaned_job_url])
+        )
         return (
-            "Import Job Link and Generate Resume",
-            _append_email_override([python, "job_link_processor.py", "--job-url", cleaned_job_url]),
+            f"Import Job Link and Generate Resume{provider_suffix}",
+            command,
+            env_overrides,
         )
     if action == "generate_next":
+        command = _with_resume_provider(
+            _append_email_override([python, "custom_resume_generator.py", "--flow", "two_step_ai", "--limit", "1"])
+        )
         return (
-            "Generate Next Resume",
-            _append_email_override([python, "custom_resume_generator.py", "--flow", "two_step_ai", "--limit", "1"]),
+            f"Generate Next Resume{provider_suffix}",
+            command,
+            env_overrides,
         )
     if action == "generate_selected":
         if count is None or count <= 0:
             raise ValueError("Resume count must be a positive number.")
+        command = _with_resume_provider(
+            _append_email_override([python, "custom_resume_generator.py", "--flow", "two_step_ai", "--limit", str(count)])
+        )
         return (
-            f"Generate {count} Selected Resume{'s' if count != 1 else ''}",
-            _append_email_override([python, "custom_resume_generator.py", "--flow", "two_step_ai", "--limit", str(count)]),
+            f"Generate {count} Selected Resume{'s' if count != 1 else ''}{provider_suffix}",
+            command,
+            env_overrides,
         )
     if action == "cleanup":
-        return "Cleanup", [python, "daily_ops.py", "cleanup"]
+        return "Cleanup", [python, "daily_ops.py", "cleanup"], {}
     if action == "generate_job":
         if not job_id:
             raise ValueError("Job ID is required.")
@@ -224,14 +284,17 @@ def _build_command(
             raise ValueError(f"Could not find job_id {job_id}.")
 
         existing_resume_id = str(job_record.get("customized_resume_id") or "").strip()
-        command = _append_email_override([python, "custom_resume_generator.py", "--job-id", job_id, "--flow", "two_step_ai"])
+        command = _with_resume_provider(
+            _append_email_override([python, "custom_resume_generator.py", "--job-id", job_id, "--flow", "two_step_ai"])
+        )
         label = f"Generate Resume for {job_id}"
         if existing_resume_id:
             command.append("--force-regenerate")
             label = f"Regenerate Resume for {job_id}"
         return (
-            label,
+            f"{label}{provider_suffix}",
             command,
+            env_overrides,
         )
     if action == "generate_cover_letter":
         if not job_id:
@@ -249,6 +312,7 @@ def _build_command(
         return (
             label,
             _append_email_override([python, "cover_letter_generator.py", "--job-id", job_id]),
+            {},
         )
 
     raise ValueError("Unknown action.")
@@ -918,6 +982,7 @@ def run_action():
     job_id = (request.form.get("job_id") or "").strip()
     job_url = (request.form.get("job_url") or "").strip()
     email_override = (request.form.get("email_override") or "").strip()
+    resume_provider = (request.form.get("resume_provider") or "").strip()
     count_raw = (request.form.get("count") or "").strip()
     count = None
     if count_raw:
@@ -927,17 +992,18 @@ def run_action():
             return jsonify({"ok": False, "error": "Resume count must be a valid integer."}), 400
 
     try:
-        label, command = _build_command(
+        label, command, env_overrides = _build_command(
             action,
             job_id or None,
             count,
             email_override or None,
             job_url or None,
+            resume_provider or None,
         )
     except ValueError as exc:
         return jsonify({"ok": False, "error": str(exc)}), 400
 
-    _run_command_in_background(label, command)
+    _run_command_in_background(label, command, env_overrides=env_overrides)
     if request.accept_mimetypes.best == "application/json":
         return jsonify({"ok": True})
     return redirect(url_for("index"))
