@@ -242,6 +242,21 @@ def _build_command(
         return "Scrape Jobs", [python, "scraper.py"], {}
     if action == "score":
         return "Score Jobs", [python, "score_jobs.py"], {}
+    if action == "linkedin_smart":
+        return (
+            "LinkedIn Smart Pipeline",
+            [
+                python,
+                "linkedin_smart_pipeline.py",
+                "--city-limit",
+                "0",
+                "--query-limit",
+                "0",
+                "--limit",
+                "0",
+            ],
+            {},
+        )
     if action == "import_job_url":
         cleaned_job_url = str(job_url or "").strip()
         if not cleaned_job_url:

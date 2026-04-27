@@ -20,6 +20,7 @@ import time
 import random
 import logging
 import threading
+import re
 from typing import Optional, Any, Type
 
 import litellm
@@ -187,6 +188,7 @@ class LLMClient:
         messages: list[dict[str, str]],
         model: str,
         temperature: float,
+        max_tokens: int | None = None,
     ) -> str:
         api_key = str(self.api_key or os.environ.get("SARVAM_API_KEY") or "").strip()
         if not api_key:
@@ -198,7 +200,10 @@ class LLMClient:
             "model": self._normalize_sarvam_model(model),
             "messages": messages,
             "temperature": temperature,
-            "max_tokens": int(os.environ.get("LLM_SARVAM_MAX_TOKENS", str(getattr(config, "LLM_SARVAM_MAX_TOKENS", 32768)))),
+            "max_tokens": int(
+                max_tokens
+                or os.environ.get("LLM_SARVAM_MAX_TOKENS", str(getattr(config, "LLM_SARVAM_MAX_TOKENS", 32768)))
+            ),
         }
         headers = {
             "Content-Type": "application/json",
@@ -223,6 +228,18 @@ class LLMClient:
         first_choice = choices[0] or {}
         message = first_choice.get("message") or {}
         content = self._normalize_message_content(message.get("content"))
+        reasoning_content = self._normalize_message_content(message.get("reasoning_content"))
+        if not content and reasoning_content:
+            fenced_match = re.search(r"```(?:json)?\s*([\s\S]*?)```", reasoning_content, flags=re.IGNORECASE)
+            if fenced_match:
+                extracted = fenced_match.group(1).strip()
+                if extracted:
+                    return extracted
+            object_match = re.search(r"\{[\s\S]*\}", reasoning_content)
+            if object_match:
+                extracted = object_match.group(0).strip()
+                if extracted:
+                    return extracted
         if content:
             return content.strip()
         if str(first_choice.get("finish_reason") or "").strip().lower() == "length":
@@ -240,6 +257,7 @@ class LLMClient:
         model_override: Optional[str] = None,
         reasoning_effort: Optional[str] = None,
         verbosity: Optional[str] = None,
+        max_tokens: Optional[int] = None,
     ) -> str:
         """
         Generate content using the configured LLM.
@@ -338,6 +356,7 @@ class LLMClient:
                         messages=messages,
                         model=current_model,
                         temperature=normalized_temperature,
+                        max_tokens=max_tokens,
                     )
                 else:
                     kwargs = base_kwargs.copy()
