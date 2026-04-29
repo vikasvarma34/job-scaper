@@ -14,6 +14,7 @@ from supabase_utils import supabase
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 HISTORICAL_APPLIED_STATUSES = ["applied", "previously_applied"]
+PRESERVED_CLEANUP_STATUSES = HISTORICAL_APPLIED_STATUSES + ["safe_for_future"]
 
 
 def _run_python_script(script_name: str, args: list[str] | None = None) -> bool:
@@ -125,17 +126,21 @@ def cleanup_for_free_tier(delete_base_resume: bool, delete_source_resume: bool) 
     - resumes/resume.pdf
     """
     try:
-        applied_jobs_response = (
+        preserved_jobs_response = (
             supabase.table(config.SUPABASE_TABLE_NAME)
             .select("job_id, customized_resume_id, status")
-            .in_("status", HISTORICAL_APPLIED_STATUSES)
+            .in_("status", PRESERVED_CLEANUP_STATUSES)
             .execute()
         )
-        applied_jobs = applied_jobs_response.data or []
-        applied_job_ids = [str(row.get("job_id") or "").strip() for row in applied_jobs if str(row.get("job_id") or "").strip()]
-        applied_resume_ids = [
+        preserved_jobs = preserved_jobs_response.data or []
+        preserved_job_ids = [
+            str(row.get("job_id") or "").strip()
+            for row in preserved_jobs
+            if str(row.get("job_id") or "").strip()
+        ]
+        preserved_resume_ids = [
             str(row.get("customized_resume_id") or "").strip()
-            for row in applied_jobs
+            for row in preserved_jobs
             if str(row.get("customized_resume_id") or "").strip()
         ]
 
@@ -153,13 +158,13 @@ def cleanup_for_free_tier(delete_base_resume: bool, delete_source_resume: bool) 
             delete_cover_job_ids = [
                 str(row.get("job_id") or "").strip()
                 for row in cover_rows
-                if str(row.get("job_id") or "").strip() and str(row.get("job_id") or "").strip() not in set(applied_job_ids)
+                if str(row.get("job_id") or "").strip() and str(row.get("job_id") or "").strip() not in set(preserved_job_ids)
             ]
             if delete_cover_job_ids:
                 supabase.table(cover_letter_table).delete().in_("job_id", delete_cover_job_ids).execute()
-            if applied_job_ids:
-                supabase.table(cover_letter_table).update({"cover_letter_link": None}).in_("job_id", applied_job_ids).execute()
-            logging.info("Cleared non-applied customized_cover_letters rows.")
+            if preserved_job_ids:
+                supabase.table(cover_letter_table).update({"cover_letter_link": None}).in_("job_id", preserved_job_ids).execute()
+            logging.info("Cleared non-preserved customized_cover_letters rows.")
 
         # 3) Delete generated resume rows not tied to applied jobs.
         all_resume_rows = (
@@ -170,15 +175,15 @@ def cleanup_for_free_tier(delete_base_resume: bool, delete_source_resume: bool) 
         delete_resume_ids = [
             str(row.get("id") or "").strip()
             for row in all_resume_rows
-            if str(row.get("id") or "").strip() and str(row.get("id") or "").strip() not in set(applied_resume_ids)
+            if str(row.get("id") or "").strip() and str(row.get("id") or "").strip() not in set(preserved_resume_ids)
         ]
         if delete_resume_ids:
             supabase.table(config.SUPABASE_CUSTOMIZED_RESUMES_TABLE_NAME).delete().in_("id", delete_resume_ids).execute()
-        if applied_resume_ids:
-            supabase.table(config.SUPABASE_CUSTOMIZED_RESUMES_TABLE_NAME).update({"resume_link": None}).in_("id", applied_resume_ids).execute()
-        logging.info("Cleared non-applied customized_resumes rows.")
+        if preserved_resume_ids:
+            supabase.table(config.SUPABASE_CUSTOMIZED_RESUMES_TABLE_NAME).update({"resume_link": None}).in_("id", preserved_resume_ids).execute()
+        logging.info("Cleared non-preserved customized_resumes rows.")
 
-        # 4) Delete jobs so next day starts clean, but keep applied history.
+        # 4) Delete jobs so next day starts clean, but keep applied history and safe-for-future jobs.
         all_job_rows = (
             supabase.table(config.SUPABASE_TABLE_NAME)
             .select("job_id")
@@ -187,15 +192,15 @@ def cleanup_for_free_tier(delete_base_resume: bool, delete_source_resume: bool) 
         delete_job_ids = [
             str(row.get("job_id") or "").strip()
             for row in all_job_rows
-            if str(row.get("job_id") or "").strip() and str(row.get("job_id") or "").strip() not in set(applied_job_ids)
+            if str(row.get("job_id") or "").strip() and str(row.get("job_id") or "").strip() not in set(preserved_job_ids)
         ]
         if delete_job_ids:
             supabase.table(config.SUPABASE_TABLE_NAME).delete().in_("job_id", delete_job_ids).execute()
-        logging.info("Cleared non-applied jobs rows.")
+        logging.info("Cleared non-preserved jobs rows.")
 
         currently_applied_ids = [
             str(row.get("job_id") or "").strip()
-            for row in applied_jobs
+            for row in preserved_jobs
             if str(row.get("job_id") or "").strip() and str(row.get("status") or "").strip().lower() == "applied"
         ]
         if currently_applied_ids:

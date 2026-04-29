@@ -20,6 +20,9 @@ def _clean_text(value: str | None) -> str:
 
 def _split_paragraphs(text: str | None) -> list[str]:
     raw_text = str(text or "").replace("\r\n", "\n")
+    if "\n\n" not in raw_text and "\n" in raw_text:
+        return [line.strip() for line in raw_text.splitlines() if line.strip()]
+
     paragraphs = []
     for part in raw_text.split("\n\n"):
         cleaned = "\n".join(line.strip() for line in part.splitlines() if line.strip()).strip()
@@ -55,6 +58,7 @@ def create_cover_letter_pdf(
     email: str,
     phone: str,
     location: str,
+    linkedin: str = "",
     cover_letter_text: str,
 ) -> bytes:
     buffer = io.BytesIO()
@@ -107,6 +111,10 @@ def create_cover_letter_pdf(
     contact_line = " | ".join(part for part in contact_parts if part)
     if contact_line:
         story.append(Paragraph(escape(contact_line), style_contact))
+
+    linkedin_url = _clean_text(linkedin)
+    if linkedin_url:
+        story.append(Paragraph(escape(f"LinkedIn: {linkedin_url}"), style_contact))
 
     story.append(Spacer(1, 0.28 * inch))
 

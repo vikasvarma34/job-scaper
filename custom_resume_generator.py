@@ -312,6 +312,7 @@ def _sanitize_filename_token(value: Any, default: str = "UNKNOWN") -> str:
     text = re.sub(r"_+", "_", text).strip("_")
     return (text or default).upper()
 
+
 def _build_resume_filename(job_id: str, company: Any) -> str:
     """
     Build a readable resume filename for storage.
@@ -488,6 +489,39 @@ def _normalize_skills_output(base_skills: list[str], rewritten_skills: list[str]
     return cleaned_rewritten or cleaned_base
 
 
+def _split_bullet_ready_lines(text: Any) -> list[str]:
+    cleaned_text = _coerce_description_text(text)
+    if not cleaned_text:
+        return []
+
+    normalized = cleaned_text.replace("\r\n", "\n").replace("\r", "\n").strip()
+    normalized = re.sub(r"\s*[•·●▪◦]\s*", "\n", normalized)
+    normalized = re.sub(r"(?m)^\s*\d+[.)]\s+", "", normalized)
+    normalized = re.sub(r"(?m)^\s*[-*]\s+", "", normalized)
+    normalized = re.sub(r"(?<![\w/])\d+[.)]\s+(?=[A-Z])", "\n", normalized)
+    normalized = re.sub(r"(?<![\w/])[-*]\s+(?=[A-Z])", "\n", normalized)
+
+    lines = [
+        re.sub(r"\s+", " ", line).strip(" -*•·●▪◦\t")
+        for line in normalized.splitlines()
+        if line.strip(" -*•·●▪◦\t")
+    ]
+    if len(lines) > 1:
+        return lines
+
+    compact = re.sub(r"\s+", " ", normalized).strip()
+    sentence_lines = [
+        sentence.strip(" -*•·●▪◦\t")
+        for sentence in re.split(r"(?<=[.!?])\s+(?=[A-Z0-9])", compact)
+        if sentence.strip(" -*•·●▪◦\t")
+    ]
+    return sentence_lines or ([compact] if compact else [])
+
+
+def _normalize_bullet_description(text: Any) -> str:
+    return "\n".join(_split_bullet_ready_lines(text)).strip()
+
+
 def _normalize_personalized_resume_output(
     base_resume: Resume,
     personalized_resume: Resume,
@@ -502,6 +536,10 @@ def _normalize_personalized_resume_output(
         base_resume.skills,
         normalized_resume.skills,
     )
+    for experience in normalized_resume.experience:
+        experience.description = _normalize_bullet_description(experience.description)
+    for project in normalized_resume.projects:
+        project.description = _normalize_bullet_description(project.description)
 
     return normalized_resume
 
@@ -748,12 +786,15 @@ async def rewrite_resume_with_keyword_plan(
 
     Summary
     - Write the professional summary as one concise paragraph.
+    - Use plain, direct English. It should sound like Vikas explaining his background clearly, not like a polished AI profile.
+    - Keep sentences short and natural. Avoid long clauses and over-formal phrasing.
     - It should sound like a strong software engineering candidate, not a generic profile.
     - Include role fit, core technical strengths, and business or engineering impact when evidenced by the base resume.
     - Use several of the highest-value hard_skills in the summary when that improves ATS match and readability.
     - Reflect relevant soft_skills naturally through the phrasing and emphasis of the summary when useful.
     - You may mention user-verified first-pass skills in the summary even when they are not explicitly stated in the current base resume wording.
     - Keep it tight and readable.
+    - Avoid phrases like "dynamic", "results-oriented", "passionate", "seasoned", "proven track record", "leveraging", "spearheaded", "robust", "cutting-edge", "synergy", "transformative", and similar AI-sounding resume language.
 
     Skills
     - Present skills in meaningful grouped categories, not as one long flat list.
@@ -802,6 +843,13 @@ async def rewrite_resume_with_keyword_plan(
     - Do not add a concrete technology, implementation detail, metric, or environment claim to experience or project bullets unless it is evidenced by the base resume.
     - Avoid keyword stuffing, awkward phrasing, and buzzword clustering.
 
+    Tone and language
+    - Use simple, everyday professional English across the summary, experience bullets, and project bullets.
+    - Prefer common words over formal words: "used" over "leveraged", "built" over "architected" unless architecture work is clearly factual, "improved" over "optimized" when the exact improvement is not technical optimization.
+    - Do not make the resume sound like marketing copy.
+    - Avoid exaggerated adjectives and over-polished AI language.
+    - Keep the profile section especially direct and readable.
+
     Output scope
     - Return only the fields requested by the schema: header_title, summary, skills, experience, and projects.
     """
@@ -823,6 +871,8 @@ async def rewrite_resume_with_keyword_plan(
     - Never invent fake experience or project claims that are not evidenced by the base resume.
     - Optimize for both ATS match and human credibility.
     - Write like an experienced real resume writer: concise, specific, relevant, and natural.
+    - Use plain English that sounds like a real person, not AI-generated marketing copy.
+    - Avoid over-formal words, exaggerated adjectives, and phrases like "dynamic", "results-oriented", "proven track record", "leveraging", "spearheaded", "robust", and "cutting-edge".
     - Avoid robotic wording, buzzword stacking, and generic filler.
     - Reason privately and output only the final JSON.
     """
@@ -975,17 +1025,20 @@ async def personalize_section_with_llm(
 
         ---
         **Instructions:**
-        - Rewrite **only** the summary to be concise, impactful, and highly relevant to the Target Job.
+        - Rewrite **only** the summary to be concise, simple, and relevant to the Target Job.
         - Return the summary as one concise paragraph, not bullet points.
         - The paragraph should communicate profile, core stack, technical strengths, business/product impact, and role fit.
+        - Use plain, direct English. It should sound like Vikas explaining his background clearly, not like a polished AI profile.
+        - Keep sentences short and natural.
         - **CRITICAL: The core professional identity and experience level (e.g., "IT Support and Cybersecurity Specialist with 4+ years") from the "Original Content of This Section" MUST be preserved.** Do NOT change the candidate's stated primary role or invent a new one like "Frontend Engineer" if it wasn't their original title. The goal is to make their *existing* role and experience sound relevant, not to misrepresent their primary job function.
         - Highlight 2-3 key qualifications or experiences from the "Full Resume Context" or "Original Content of This Section" that ALIGN with the "Job Description." These highlighted aspects should be FACTUALLY based on the provided resume materials.
         - Use strong action verbs and keywords from the "Job Description" where appropriate, but ONLY when describing actual experiences or skills present in the resume.
-        - You do not have to mirror the original wording. Improve phrasing aggressively while staying factually grounded.
+        - You do not have to mirror the original wording, but do not over-polish it.
+        - Avoid phrases like "dynamic", "results-oriented", "passionate", "seasoned", "proven track record", "leveraging", "spearheaded", "robust", "cutting-edge", "synergy", and similar AI-sounding resume language.
         - **ABSOLUTELY DO NOT INVENT new information, skills, projects, job titles, or responsibilities not explicitly found in the original resume materials.** Rephrasing and emphasizing existing facts is allowed; fabrication is not.
         - For example, if the original summary says "IT Support Specialist who developed a tool using React," do NOT change this to "Experienced Frontend Engineer." Instead, you might say "IT Support Specialist with experience developing user-facing tools using React, such as Click4IT..."
         ---
-        **Expected JSON Output Structure:** {{"summary": "A dynamic and results-oriented Software Engineer with X years of experience..."}}
+        **Expected JSON Output Structure:** {{"summary": "Software Engineer with X years of experience building backend and full-stack applications..."}}
         """
         prompt = prompt_intro + specific_instructions
 
@@ -1397,6 +1450,8 @@ async def run_job_processing_cycle(
     min_score_for_custom = int(getattr(config, "MIN_SCORE_FOR_CUSTOM_RESUME", 50))
     effective_min_score = 0 if manual_limit_mode else min_score_for_custom
     top_percent = 0 if manual_limit_mode else (getattr(config, "JOBS_TO_CUSTOMIZE_TOP_PERCENT", 0) or 0)
+    max_per_company = int(getattr(config, "RESUME_MAX_JOBS_PER_COMPANY_PER_RUN", 0) or 0)
+    safety_cap = int(getattr(config, "RESUME_GENERATION_SAFETY_CAP", 0) or 0)
 
     if manual_limit_mode:
         logging.info(
@@ -1416,8 +1471,26 @@ async def run_job_processing_cycle(
             jobs_limit = 0
             logging.info("Top-percent mode enabled but no eligible jobs found.")
 
-    logging.info(f"Fetching top {jobs_limit} scored jobs to apply for...")
-    jobs_to_process = supabase_utils.get_top_scored_jobs_for_resume_generation(limit=jobs_limit)
+    if not manual_limit_mode and jobs_limit == 0 and safety_cap > 0:
+        jobs_limit = safety_cap
+        logging.info(
+            "Unlimited resume generation requested; applying safety cap of %s jobs. "
+            "Use --limit to override for a specific run.",
+            safety_cap,
+        )
+
+    if jobs_limit == 0:
+        logging.info(
+            "Fetching all scored jobs eligible for resume generation with score >= %s...",
+            effective_min_score,
+        )
+    else:
+        logging.info(f"Fetching top {jobs_limit} scored jobs to apply for...")
+    jobs_to_process = supabase_utils.get_top_scored_jobs_for_resume_generation(
+        limit=jobs_limit,
+        min_score=effective_min_score,
+        max_per_company=max_per_company if not manual_limit_mode else None,
+    )
     if jobs_to_process and effective_min_score > 0:
         filtered_jobs = []
         for job in jobs_to_process:

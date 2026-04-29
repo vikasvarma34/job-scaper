@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import hashlib
+import html as html_lib
 import json
 import logging
 import re
@@ -21,9 +22,9 @@ from llm_client import primary_client
 from models import ATSKeywordPlan, JobPostingIntakeOutput, Resume
 
 try:
-    from playwright.sync_api import sync_playwright
+    from playwright.async_api import async_playwright
 except Exception:  # pragma: no cover - optional runtime fallback
-    sync_playwright = None
+    async_playwright = None
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -124,20 +125,146 @@ def _fetch_with_requests(url: str) -> tuple[str, str] | None:
     return None
 
 
-def _fetch_with_playwright(url: str) -> tuple[str, str] | None:
-    if sync_playwright is None:
+def _extract_naukri_job_id(url: str) -> str:
+    hostname = urlparse(url).netloc.lower().strip()
+    if "naukri.com" not in hostname:
+        return ""
+
+    path = urlparse(url).path.rstrip("/")
+    match = re.search(r"-(\d{10,})$", path)
+    return match.group(1) if match else ""
+
+
+def _normalize_api_html(raw_html: str | None) -> str:
+    text = str(raw_html or "").strip()
+    if not text:
+        return ""
+    markdown_text = _html_to_markdown(html_lib.unescape(text))
+    return markdown_text or BeautifulSoup(html_lib.unescape(text), "html.parser").get_text(" ", strip=True)
+
+
+def _format_experience(min_exp: str, max_exp: str) -> str:
+    if min_exp and max_exp:
+        return f"{min_exp}-{max_exp} years" if min_exp != max_exp else f"{min_exp} years"
+    if min_exp:
+        return f"{min_exp}+ years"
+    if max_exp:
+        return f"up to {max_exp} years"
+    return ""
+
+
+def _fetch_with_naukri_api(url: str) -> tuple[str, str] | None:
+    job_id = _extract_naukri_job_id(url)
+    if not job_id:
+        return None
+
+    headers = dict(FETCH_HEADERS)
+    headers.update(
+        {
+            "Accept": "application/json,text/plain,*/*",
+            "appid": "109",
+            "systemid": "109",
+            "origin": "https://www.naukri.com",
+            "referer": url,
+        }
+    )
+
+    for api_url in (
+        f"https://www.naukri.com/jobapi/v2/job/{job_id}",
+        f"https://www.naukri.com/jobapi/v1/job/{job_id}",
+    ):
+        try:
+            response = requests.get(
+                api_url,
+                headers=headers,
+                timeout=getattr(config, "REQUEST_TIMEOUT", 30),
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except Exception as exc:
+            logging.warning("Naukri API fetch failed for %s via %s: %s", job_id, api_url, exc)
+            continue
+
+        job_data = payload.get("job") if isinstance(payload, dict) else None
+        if not isinstance(job_data, dict):
+            continue
+
+        final_url = str(job_data.get("job_static_url") or url).strip() or url
+        if final_url.startswith("/"):
+            final_url = "https://www.naukri.com" + final_url
+
+        description = _normalize_api_html(job_data.get("jobDesc"))
+        company_profile = _normalize_api_html(job_data.get("companyProfile"))
+        keywords = str(job_data.get("keywords") or "").strip()
+        title = str(job_data.get("post") or "").strip()
+        company = str(job_data.get("companyName") or job_data.get("CONTCOM") or "").strip()
+        location = str(job_data.get("location") or job_data.get("cityfield") or "").strip()
+        min_exp = str(job_data.get("minExp") or "").strip()
+        max_exp = str(job_data.get("maxExp") or "").strip()
+        experience = _format_experience(min_exp, max_exp)
+        employment_type = str(job_data.get("employmentType") or "").strip()
+
+        structured_data = {
+            "@context": "https://schema.org",
+            "@type": "JobPosting",
+            "title": title,
+            "hiringOrganization": {"@type": "Organization", "name": company},
+            "jobLocation": location,
+            "employmentType": employment_type,
+            "experienceRequirements": experience,
+            "skills": keywords,
+            "description": description,
+            "url": final_url,
+        }
+
+        structured_json = json.dumps(structured_data, ensure_ascii=False).replace("</", "<\\/")
+        html = f"""
+<!doctype html>
+<html>
+<head>
+  <title>{html_lib.escape(title)} - {html_lib.escape(company)}</title>
+  <meta name="description" content="{html_lib.escape(description[:500])}">
+  <script type="application/ld+json">{structured_json}</script>
+</head>
+<body>
+  <main>
+    <h1>{html_lib.escape(title)}</h1>
+    <p>Company: {html_lib.escape(company)}</p>
+    <p>Location: {html_lib.escape(location)}</p>
+    <p>Experience: {html_lib.escape(experience)}</p>
+    <p>Employment type: {html_lib.escape(employment_type)}</p>
+    <p>Keywords: {html_lib.escape(keywords)}</p>
+    <h2>Job Description</h2>
+    <div>{html_lib.escape(description)}</div>
+    <h2>Company Profile</h2>
+    <div>{html_lib.escape(company_profile)}</div>
+  </main>
+</body>
+</html>
+""".strip()
+
+        if html and _html_has_useful_text(html):
+            logging.info("Fetched Naukri job page with API: %s", final_url)
+            return final_url, html
+        logging.warning("Naukri API fetch for %s returned insufficient content.", job_id)
+
+    return None
+
+
+async def _fetch_with_playwright(url: str) -> tuple[str, str] | None:
+    if async_playwright is None:
         logging.warning("Playwright is not available for fallback fetching.")
         return None
 
     try:
-        with sync_playwright() as playwright:
-            browser = playwright.chromium.launch(headless=True)
-            page = browser.new_page()
-            page.goto(url, wait_until="domcontentloaded", timeout=45000)
-            page.wait_for_timeout(1800)
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch(headless=True)
+            page = await browser.new_page()
+            await page.goto(url, wait_until="domcontentloaded", timeout=45000)
+            await page.wait_for_timeout(1800)
             final_url = page.url or url
-            html = page.content() or ""
-            browser.close()
+            html = await page.content() or ""
+            await browser.close()
         if html and _html_has_useful_text(html):
             logging.info("Fetched job page with Playwright: %s", final_url)
             return final_url, html
@@ -367,7 +494,9 @@ async def process_job_link(job_url: str, email_override: str | None = None) -> i
         logging.error("Could not load base resume details.")
         return 1
 
-    fetched = _fetch_with_requests(normalized_url) or _fetch_with_playwright(normalized_url)
+    fetched = _fetch_with_naukri_api(normalized_url) or _fetch_with_requests(normalized_url)
+    if not fetched:
+        fetched = await _fetch_with_playwright(normalized_url)
     if not fetched:
         logging.error("Could not fetch readable content from the job URL.")
         return 1

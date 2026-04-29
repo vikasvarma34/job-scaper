@@ -308,6 +308,63 @@ def _parse_score_and_experience(raw_response: str) -> tuple[Optional[int], str]:
     return parsed_score, parsed_experience
 
 
+def _minimum_required_years(experience_required: str) -> Optional[int]:
+    normalized = str(experience_required or "").strip().lower()
+    if not normalized or normalized == "not stated":
+        return None
+
+    numbers = re.findall(r"\d{1,2}", normalized)
+    if not numbers:
+        return None
+    try:
+        return int(numbers[0])
+    except ValueError:
+        return None
+
+
+def _extract_explicit_experience_from_description(description: str) -> str:
+    text = re.sub(r"\s+", " ", str(description or "").lower()).strip()
+    if not text or _looks_like_education_years(text) and not re.search(r"\b(experience|work|yoe)\b", text):
+        return "Not stated"
+
+    patterns = [
+        r"(?:at least|minimum(?: of)?|required|requires|need|needs)\s*\d{1,2}\+?\s*(?:years?|yrs?|yr|yoe)\b(?:\s+of)?\s+(?:work\s+)?experience",
+        r"\d{1,2}\s*(?:-|–|—|to)\s*\d{1,2}\s*(?:years?|yrs?|yr|yoe)\b(?:\s+of)?\s+(?:work\s+)?experience",
+        r"\d{1,2}\+\s*(?:years?|yrs?|yr|yoe)\b(?:\s+of)?\s+(?:work\s+)?experience",
+        r"\d{1,2}\s*(?:years?|yrs?|yr|yoe)\b(?:\s+of)?\s+(?:work\s+)?experience",
+        r"(?:experience|work experience)\s*(?:of|:)?\s*\d{1,2}\s*(?:-|–|—|to)\s*\d{1,2}\s*(?:years?|yrs?|yr|yoe)?\b",
+        r"(?:experience|work experience)\s*(?:of|:)?\s*\d{1,2}\+?\s*(?:years?|yrs?|yr|yoe)?\b",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            return _normalize_experience_required(match.group(0))
+    return "Not stated"
+
+
+def _apply_experience_score_override(
+    score: int,
+    experience_required: str,
+    job_description: str,
+    job_id: Any,
+) -> tuple[int, str]:
+    normalized_experience = _normalize_experience_required(experience_required)
+    if normalized_experience == "Not stated":
+        fallback_experience = _extract_explicit_experience_from_description(job_description)
+        if fallback_experience != "Not stated":
+            normalized_experience = fallback_experience
+
+    min_years = _minimum_required_years(normalized_experience)
+    if min_years is not None and min_years >= 4:
+        logging.info(
+            "Forcing score to 0 for job_id %s because explicit minimum experience is %s.",
+            job_id,
+            normalized_experience,
+        )
+        return 0, normalized_experience
+    return score, normalized_experience
+
+
 def get_resume_score_from_ai(resume_text: str, job_details: Dict[str, Any]) -> tuple[Optional[int], str]:
     """
     Sends resume and job details to Gemini to get a suitability score.
@@ -454,6 +511,12 @@ def get_resume_score_from_ai(resume_text: str, job_details: Dict[str, Any]) -> t
                         )
                         score, experience_required = _parse_score_and_experience(last_raw_response)
                         if score is not None and 0 <= score <= 100:
+                            score, experience_required = _apply_experience_score_override(
+                                score,
+                                experience_required,
+                                job_description,
+                                job_details.get('job_id'),
+                            )
                             logging.info(
                                 "Received score %s for job_id: %s (experience_required=%s)",
                                 score,
@@ -479,6 +542,12 @@ def get_resume_score_from_ai(resume_text: str, job_details: Dict[str, Any]) -> t
                 continue
 
             if 0 <= score <= 100:
+                score, experience_required = _apply_experience_score_override(
+                    score,
+                    experience_required,
+                    job_description,
+                    job_details.get('job_id'),
+                )
                 logging.info(
                     "Received score %s for job_id: %s (experience_required=%s)",
                     score,

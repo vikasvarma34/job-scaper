@@ -256,36 +256,114 @@ def get_top_scored_jobs_to_apply(limit: int) -> list:
         logging.error(f"Error fetching top-scored jobs to apply for from Supabase: {e}")
         return []
 
-def get_top_scored_jobs_for_resume_generation(limit: int) -> list:
+def get_top_scored_jobs_for_resume_generation(
+    limit: int,
+    min_score: int = 50,
+    max_per_company: int | None = None,
+) -> list:
     """
-    Fetches the top-scored jobs from Supabase using the RPC 'get_top_scored_jobs_custom_sort'.
-    p_page_number is set to 1 and p_page_size is set to the limit.
-    Selects fields needed for the application process.
+    Fetches top scored jobs eligible for resume generation.
+    A limit of 0 means "all eligible jobs".
     """
-    if limit <= 0:
-        logging.warning("Limit for jobs to apply must be positive.")
+    if limit < 0:
+        logging.warning("Limit for jobs to apply cannot be negative.")
         return []
 
     try:
-        logging.info(f"Fetching up to {limit} top-scored jobs to apply for using RPC 'get_top_scored_jobs_custom_sort'...")
-        response = supabase.rpc(
-                "get_jobs_for_resume_generation_custom_sort",
-                {"p_page_number": 1, "p_page_size": limit}
-            ).execute()
+        limit_text = "all" if limit == 0 else f"up to {limit}"
+        logging.info(
+            "Fetching %s top-scored jobs for resume generation with min_score=%s and max_per_company=%s...",
+            limit_text,
+            min_score,
+            max_per_company or "disabled",
+        )
 
-        if response.data:
-            logging.info(f"Successfully fetched {len(response.data)} top-scored jobs to apply for via RPC.")
-            return response.data
-        else:
-            # Check for RPC specific errors if any, or just log general empty data
-            if hasattr(response, 'error') and response.error:
-                logging.error(f"Error calling RPC 'get_top_scored_jobs_custom_sort': {response.error.message}")
-            else:
-                logging.info("No top-scored jobs found ready for application at this time via RPC.")
-            return []
+        candidate_rows: list[dict] = []
+        selected_jobs: list[dict] = []
+        company_counts: dict[str, int] = {}
+        offset = 0
+        batch_size = 1000
+
+        while True:
+            query = (
+                supabase.table(config.SUPABASE_TABLE_NAME)
+                .select(
+                    "job_id, company, job_title, level, location, description, status, "
+                    "is_active, application_date, resume_score, notes, scraped_at, "
+                    "last_checked, job_state, resume_score_stage, is_interested, "
+                    "customized_resume_id, provider"
+                )
+                .eq("is_active", True)
+                .eq("status", "new")
+                .eq("job_state", "new")
+                .is_("customized_resume_id", None)
+                .not_.is_("resume_score", None)
+                .range(offset, offset + batch_size - 1)
+            )
+            if min_score > 0:
+                query = query.gte("resume_score", min_score)
+
+            response = query.execute()
+            rows = response.data or []
+            if not rows:
+                break
+            candidate_rows.extend(rows)
+
+            if len(rows) < batch_size:
+                break
+            offset += batch_size
+
+        def _interest_priority(row: dict) -> int:
+            if row.get("is_interested") is True:
+                return 0
+            if row.get("is_interested") is None:
+                return 1
+            return 2
+
+        def _score_sort_value(row: dict) -> int:
+            try:
+                return int(row.get("resume_score") or 0)
+            except (TypeError, ValueError):
+                return 0
+
+        def _scraped_timestamp(row: dict) -> float:
+            raw_value = str(row.get("scraped_at") or "").strip()
+            if not raw_value:
+                return 0.0
+            try:
+                return datetime.datetime.fromisoformat(raw_value.replace("Z", "+00:00")).timestamp()
+            except ValueError:
+                return 0.0
+
+        ranked_rows = sorted(
+            candidate_rows,
+            key=lambda row: (
+                _interest_priority(row),
+                -_score_sort_value(row),
+                -_scraped_timestamp(row),
+            ),
+        )
+
+        for row in ranked_rows:
+            company = str(row.get("company") or "unknown_company").strip().lower()
+            if max_per_company and max_per_company > 0:
+                if company_counts.get(company, 0) >= max_per_company:
+                    continue
+            selected_jobs.append(row)
+            company_counts[company] = company_counts.get(company, 0) + 1
+            if limit > 0 and len(selected_jobs) >= limit:
+                logging.info("Selected %s jobs for resume generation.", len(selected_jobs))
+                return selected_jobs
+
+        if selected_jobs:
+            logging.info("Selected %s jobs for resume generation.", len(selected_jobs))
+            return selected_jobs
+
+        logging.info("No top-scored jobs found ready for resume generation.")
+        return []
 
     except Exception as e:
-        logging.error(f"Error fetching top-scored jobs to apply for from Supabase RPC: {e}")
+        logging.error(f"Error fetching top-scored jobs for resume generation from Supabase: {e}")
         return []
 
 def count_jobs_for_resume_generation_candidates(min_score: int = 50) -> int:
@@ -576,6 +654,73 @@ def mark_jobs_as_not_available(job_ids: list[str]) -> tuple[int, int]:
     except Exception as e:
         logging.error(f"Error marking jobs as not available: {e}")
         return 0, len(cleaned_ids)
+
+
+def mark_jobs_as_safe_for_future(job_ids: list[str]) -> tuple[int, int]:
+    """
+    Marks jobs as safe to preserve during cleanup.
+    """
+    cleaned_ids = [str(j).strip() for j in (job_ids or []) if str(j).strip()]
+    if not cleaned_ids:
+        logging.warning("No valid job IDs provided to mark safe for future.")
+        return 0, 0
+
+    try:
+        response = (
+            supabase.table(config.SUPABASE_TABLE_NAME)
+            .update(
+                {
+                    "status": "safe_for_future",
+                    "job_state": "safe_for_future",
+                    "is_active": True,
+                }
+            )
+            .in_("job_id", cleaned_ids)
+            .execute()
+        )
+        updated_count = len(response.data) if getattr(response, "data", None) else 0
+        logging.info("Marked %s/%s jobs as safe for future.", updated_count, len(cleaned_ids))
+        return updated_count, len(cleaned_ids)
+    except Exception as e:
+        logging.error(f"Error marking jobs safe for future: {e}")
+        return 0, len(cleaned_ids)
+
+
+def restore_jobs_to_active(job_ids: list[str]) -> tuple[int, int]:
+    """
+    Moves jobs back into the active list after an accidental applied/remove action.
+    """
+    cleaned_ids = [str(j).strip() for j in (job_ids or []) if str(j).strip()]
+    if not cleaned_ids:
+        logging.warning("No valid job IDs provided to restore.")
+        return 0, 0
+
+    updated_count = 0
+    try:
+        for job_id in cleaned_ids:
+            job = get_job_by_id(job_id) or {}
+            next_status = "resume_generated" if str(job.get("customized_resume_id") or "").strip() else "new"
+            response = (
+                supabase.table(config.SUPABASE_TABLE_NAME)
+                .update(
+                    {
+                        "status": next_status,
+                        "job_state": "new",
+                        "is_active": True,
+                        "application_date": None,
+                    }
+                )
+                .eq("job_id", job_id)
+                .execute()
+            )
+            if getattr(response, "data", None):
+                updated_count += len(response.data)
+        logging.info("Restored %s/%s jobs to active.", updated_count, len(cleaned_ids))
+        return updated_count, len(cleaned_ids)
+    except Exception as e:
+        logging.error(f"Error restoring jobs to active: {e}")
+        return updated_count, len(cleaned_ids)
+
 
 def upload_customized_resume_to_storage(file_content: bytes, destination_path: str) -> Optional[str]:
     """

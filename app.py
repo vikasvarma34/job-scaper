@@ -23,6 +23,9 @@ from models import Resume
 ROOT_DIR = Path(__file__).resolve().parent
 CURRENT_APPLIED_STATUS = "applied"
 HISTORICAL_APPLIED_STATUSES = {"applied", "previously_applied"}
+SAFE_FOR_FUTURE_STATUS = "safe_for_future"
+TERMINAL_STATUSES = HISTORICAL_APPLIED_STATUSES | {"not_available"}
+HELD_STATUSES = TERMINAL_STATUSES | {SAFE_FOR_FUTURE_STATUS}
 
 app = Flask(__name__)
 app.config["SECRET_KEY"] = os.environ.get("FLASK_SECRET_KEY", "job-scraper-dashboard")
@@ -66,6 +69,25 @@ def _sanitize_filename_token(value: object, default: str = "UNKNOWN") -> str:
     text = re.sub(r"[^A-Za-z0-9]+", "_", text)
     text = re.sub(r"_+", "_", text).strip("_")
     return (text or default).upper()
+
+
+def _company_first_filename_token(company: object, default: str = "COMPANY") -> str:
+    text = str(company or "").strip()
+    if not text:
+        return default
+    first_word = re.split(r"\s+", text, maxsplit=1)[0]
+    token = re.sub(r"[^A-Za-z0-9]+", "", first_word)
+    if not token:
+        token = _sanitize_filename_token(text, default=default).split("_", 1)[0]
+    return (token or default).upper()
+
+
+def _build_resume_download_name(company: object) -> str:
+    return f"VIKAS_POKALA_{_company_first_filename_token(company)}.PDF"
+
+
+def _build_cover_letter_download_name(company: object) -> str:
+    return f"VIKAS_POKALA_{_company_first_filename_token(company)}_CL.PDF"
 
 
 def _build_resume_storage_path(job_id: str, company: object) -> str:
@@ -344,6 +366,24 @@ def _fetch_resume_links_by_id(resume_ids: list[str]) -> dict[str, str]:
         return {"__error__": f"Failed to load resume links: {exc}"}
 
 
+def _fetch_company_by_resume_id(resume_id: str) -> str:
+    cleaned_resume_id = str(resume_id or "").strip()
+    if not cleaned_resume_id:
+        return ""
+    try:
+        response = (
+            supabase_utils.supabase.table(config.SUPABASE_TABLE_NAME)
+            .select("company")
+            .eq("customized_resume_id", cleaned_resume_id)
+            .limit(1)
+            .execute()
+        )
+        rows = response.data or []
+        return str((rows[0] if rows else {}).get("company") or "").strip()
+    except Exception:
+        return ""
+
+
 def _build_linkedin_url(provider: str | None, job_id: str | None) -> str:
     if (provider or "").strip().lower() == "linkedin" and str(job_id or "").strip():
         return f"https://www.linkedin.com/jobs/view/{job_id}/"
@@ -526,6 +566,7 @@ def _fetch_dashboard_data() -> dict:
                 "pending_jobs": 0,
                 "applied_jobs": 0,
                 "not_available_jobs": 0,
+                "safe_for_future_jobs": 0,
                 "cover_letters_ready": 0,
                 "ready_to_apply": 0,
             },
@@ -541,6 +582,7 @@ def _fetch_dashboard_data() -> dict:
                 "pending_jobs": 0,
                 "applied_jobs": 0,
                 "not_available_jobs": 0,
+                "safe_for_future_jobs": 0,
                 "cover_letters_ready": 0,
                 "ready_to_apply": 0,
             },
@@ -584,12 +626,17 @@ def _fetch_dashboard_data() -> dict:
             if str(job.get("status") or "").strip().lower() == CURRENT_APPLIED_STATUS
         ),
         "not_available_jobs": sum(1 for job in active_jobs if str(job.get("status") or "").strip().lower() == "not_available"),
+        "safe_for_future_jobs": sum(
+            1
+            for job in active_jobs
+            if str(job.get("status") or "").strip().lower() == SAFE_FOR_FUTURE_STATUS
+        ),
         "cover_letters_ready": sum(1 for job in active_jobs if bool(job.get("has_cover_letter"))),
         "ready_to_apply": sum(
             1
             for job in active_jobs
             if bool(job.get("has_resume"))
-            and str(job.get("status") or "").strip().lower() not in HISTORICAL_APPLIED_STATUSES | {"not_available"}
+            and str(job.get("status") or "").strip().lower() not in HELD_STATUSES
         ),
     }
 
@@ -666,6 +713,32 @@ def mark_job_not_available(job_id: str):
     updated, requested = supabase_utils.mark_jobs_as_not_available([cleaned_job_id])
     if updated <= 0:
         return jsonify({"ok": False, "error": f"Could not mark job {cleaned_job_id} as not available."}), 400
+
+    return jsonify({"ok": True, "updated": updated, "requested": requested, "job_id": cleaned_job_id})
+
+
+@app.post("/jobs/<job_id>/safe-for-future")
+def mark_job_safe_for_future(job_id: str):
+    cleaned_job_id = str(job_id or "").strip()
+    if not cleaned_job_id:
+        return jsonify({"ok": False, "error": "Job ID is required."}), 400
+
+    updated, requested = supabase_utils.mark_jobs_as_safe_for_future([cleaned_job_id])
+    if updated <= 0:
+        return jsonify({"ok": False, "error": f"Could not mark job {cleaned_job_id} as safe for future."}), 400
+
+    return jsonify({"ok": True, "updated": updated, "requested": requested, "job_id": cleaned_job_id})
+
+
+@app.post("/jobs/<job_id>/restore-active")
+def restore_job_active(job_id: str):
+    cleaned_job_id = str(job_id or "").strip()
+    if not cleaned_job_id:
+        return jsonify({"ok": False, "error": "Job ID is required."}), 400
+
+    updated, requested = supabase_utils.restore_jobs_to_active([cleaned_job_id])
+    if updated <= 0:
+        return jsonify({"ok": False, "error": f"Could not restore job {cleaned_job_id}."}), 400
 
     return jsonify({"ok": True, "updated": updated, "requested": requested, "job_id": cleaned_job_id})
 
@@ -801,7 +874,7 @@ def download_resume(resume_id: str):
     except Exception as exc:
         abort(500, f"Failed to download resume: {exc}")
 
-    file_name = Path(resume_path).name or f"{resume_id}.pdf"
+    file_name = _build_resume_download_name(_fetch_company_by_resume_id(resume_id))
     return send_file(
         io.BytesIO(file_bytes),
         mimetype="application/pdf",
@@ -828,7 +901,8 @@ def download_cover_letter(job_id: str):
     except Exception as exc:
         abort(500, f"Failed to download cover letter: {exc}")
 
-    file_name = Path(cover_letter_path).name or f"{job_id}_cover_letter.pdf"
+    job_record = supabase_utils.get_job_by_id(job_id) or {}
+    file_name = _build_cover_letter_download_name(job_record.get("company"))
     return send_file(
         io.BytesIO(file_bytes),
         mimetype="application/pdf",
@@ -925,6 +999,7 @@ def edit_documents(job_id: str):
                                 email=updated_resume.email,
                                 phone=updated_resume.phone,
                                 location=updated_resume.location,
+                                linkedin=updated_resume.links.linkedin if updated_resume.links else "",
                                 cover_letter_text=cover_letter_text,
                             )
                         except Exception as exc:

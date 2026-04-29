@@ -182,6 +182,7 @@
                 <option value="all">All Jobs</option>
                 <option value="ready">Ready To Apply</option>
                 <option value="resume_generated">Resume Generated</option>
+                <option value="safe_for_future">Safe For Future</option>
                 <option value="applied">Applied</option>
                 <option value="previously_applied">Previously Applied</option>
                 <option value="not_available">Not Available</option>
@@ -208,6 +209,10 @@
           <button class="filter-pill" type="button" data-quick-filter="applied">
             <span>Applied</span>
             <strong data-filter-count="applied">0</strong>
+          </button>
+          <button class="filter-pill" type="button" data-quick-filter="safe_for_future">
+            <span>Safe Future</span>
+            <strong data-filter-count="safe_for_future">0</strong>
           </button>
           <button class="filter-pill" type="button" data-quick-filter="previously_applied">
             <span>Previously Applied</span>
@@ -327,13 +332,21 @@
         return String(job.status || "").trim().toLowerCase();
       }
 
+      function isTerminalStatus(status) {
+        return ["applied", "previously_applied", "not_available"].includes(status);
+      }
+
+      function isHeldStatus(status) {
+        return isTerminalStatus(status) || status === "safe_for_future";
+      }
+
       function humanizeText(value) {
         return String(value || "").replaceAll("_", " ").trim() || "unknown";
       }
 
       function hasReadyResume(job) {
         return Boolean(job.has_resume)
-          && !["applied", "previously_applied", "not_available"].includes(normalizeStatus(job));
+          && !isHeldStatus(normalizeStatus(job));
       }
 
       function formatTimestamp(value) {
@@ -390,6 +403,8 @@
           tone = "muted";
         } else if (normalizedStatus === "not_available") {
           tone = "muted";
+        } else if (normalizedStatus === "safe_for_future") {
+          tone = "accent";
         } else if (hasReadyResume(job)) {
           tone = "accent";
         }
@@ -417,7 +432,7 @@
         const actions = [];
         const jobId = escapeHtml(job.job_id || "");
         const normalizedStatus = normalizeStatus(job);
-        const canUpdateStatus = !["applied", "previously_applied", "not_available"].includes(normalizedStatus) && job.job_id;
+        const canUpdateStatus = !isTerminalStatus(normalizedStatus) && job.job_id;
         const canGenerateResume = normalizedStatus !== "not_available" && job.job_id;
         const generateResumeLabel = job.has_resume ? "Regenerate Resume" : "Generate Resume";
 
@@ -451,8 +466,16 @@
           actions.push(`<button class="mini-button success" data-mark-applied="true" data-job-id="${jobId}">Mark Applied</button>`);
         }
 
-        if (canUpdateStatus) {
-          actions.push(`<button class="mini-button muted" data-mark-not-available="true" data-job-id="${jobId}">Mark Not Available</button>`);
+        if (canUpdateStatus && normalizedStatus !== "safe_for_future") {
+          actions.push(`<button class="mini-button secondary" data-mark-safe-future="true" data-job-id="${jobId}">Safe For Future</button>`);
+        }
+
+        if (normalizedStatus !== "not_available" && job.job_id) {
+          actions.push(`<button class="mini-button muted" data-mark-not-available="true" data-job-id="${jobId}">Remove From List</button>`);
+        }
+
+        if (isTerminalStatus(normalizedStatus) || normalizedStatus === "safe_for_future") {
+          actions.push(`<button class="mini-button secondary" data-restore-active="true" data-job-id="${jobId}">Restore Active</button>`);
         }
 
         actions.push(
@@ -465,7 +488,9 @@
             ? `<span class="mini-label muted">Previously Applied</span>`
             : normalizedStatus === "not_available"
               ? `<span class="mini-label muted">Not Available</span>`
-              : "";
+              : normalizedStatus === "safe_for_future"
+                ? `<span class="mini-label success">Safe For Future</span>`
+                : "";
 
         if (!actions.length) {
           return `<div class="job-actions-row">${statusPill || `<span class="mini-label muted">No actions available</span>`}</div>`;
@@ -489,7 +514,7 @@
         }
         if (filterValue === "no_resume") {
           return !job.has_resume
-            && !["applied", "previously_applied", "not_available"].includes(normalizedStatus);
+            && !isHeldStatus(normalizedStatus);
         }
         if (filterValue === "scored") {
           return job.resume_score !== null && job.resume_score !== undefined;
@@ -606,6 +631,7 @@
           ready: items.filter((job) => matchesStatusFilter(job, "ready")).length,
           no_resume: items.filter((job) => matchesStatusFilter(job, "no_resume")).length,
           applied: items.filter((job) => matchesStatusFilter(job, "applied")).length,
+          safe_for_future: items.filter((job) => matchesStatusFilter(job, "safe_for_future")).length,
           previously_applied: items.filter((job) => matchesStatusFilter(job, "previously_applied")).length,
           not_available: items.filter((job) => matchesStatusFilter(job, "not_available")).length
         };
@@ -625,7 +651,7 @@
           return;
         }
         const prioritized = items
-          .filter((job) => !["applied", "previously_applied", "not_available"].includes(normalizeStatus(job)))
+          .filter((job) => !isHeldStatus(normalizeStatus(job)))
           .slice(0, 4);
 
         if (!prioritized.length) {
@@ -761,6 +787,8 @@
         jobsList.innerHTML = visibleJobs.map((job) => renderJobCard(job)).join("");
 
         bindAppliedButtons();
+        bindSafeFutureButtons();
+        bindRestoreActiveButtons();
         bindRestoreResumeButtons();
         bindNotAvailableButtons();
         bindCopyJdButtons();
@@ -783,6 +811,18 @@
       function bindNotAvailableButtons() {
         document.querySelectorAll("[data-mark-not-available='true']").forEach((button) => {
           button.addEventListener("click", () => markNotAvailable(button.dataset.jobId));
+        });
+      }
+
+      function bindSafeFutureButtons() {
+        document.querySelectorAll("[data-mark-safe-future='true']").forEach((button) => {
+          button.addEventListener("click", () => markSafeFuture(button.dataset.jobId));
+        });
+      }
+
+      function bindRestoreActiveButtons() {
+        document.querySelectorAll("[data-restore-active='true']").forEach((button) => {
+          button.addEventListener("click", () => restoreActive(button.dataset.jobId));
         });
       }
 
@@ -879,6 +919,54 @@
         const payload = await response.json();
         if (!response.ok) {
           alert(payload.error || "Failed to mark job as not available.");
+          return;
+        }
+
+        await refreshDashboard();
+        scheduleRefreshLoop();
+      }
+
+      async function markSafeFuture(jobId) {
+        if (!jobId) {
+          return;
+        }
+
+        const isConfirmed = window.confirm(`Keep job ${jobId} safe for future cleanup?`);
+        if (!isConfirmed) {
+          return;
+        }
+
+        const response = await fetch(`${jobsBaseUrl}/${encodeURIComponent(jobId)}/safe-for-future`, {
+          method: "POST",
+          headers: { "Accept": "application/json" }
+        });
+        const payload = await response.json();
+        if (!response.ok) {
+          alert(payload.error || "Failed to mark job safe for future.");
+          return;
+        }
+
+        await refreshDashboard();
+        scheduleRefreshLoop();
+      }
+
+      async function restoreActive(jobId) {
+        if (!jobId) {
+          return;
+        }
+
+        const isConfirmed = window.confirm(`Move job ${jobId} back to the active list?`);
+        if (!isConfirmed) {
+          return;
+        }
+
+        const response = await fetch(`${jobsBaseUrl}/${encodeURIComponent(jobId)}/restore-active`, {
+          method: "POST",
+          headers: { "Accept": "application/json" }
+        });
+        const payload = await response.json();
+        if (!response.ok) {
+          alert(payload.error || "Failed to restore job.");
           return;
         }
 

@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import re
+import time
 from typing import Any, Dict
 
 import config
@@ -119,12 +120,13 @@ Customized resume:
 
 Goals:
 - Sound human, specific, and professional.
-- Do not sound robotic, generic, or over-polished.
+- Use simple, direct English. It should sound like a real application note from Vikas, not an AI-generated letter.
+- Do not sound robotic, generic, over-polished, or dramatic.
 - Do not restate the resume section by section.
 - Do not copy the summary or bullet points verbatim.
 - Add fresh framing, motivation, and role fit.
 - Use important job-description keywords naturally.
-- Keep it to one page, roughly 250 to 400 words.
+- Keep it to one page, roughly 180 to 280 words.
 - Use simple ATS-safe formatting and plain paragraphs.
 - Do not invent facts, employers, dates, technologies, metrics, or achievements not supported by the customized resume.
 
@@ -135,22 +137,118 @@ Structure:
 - Middle: strongest relevant experience and outcomes, with selective evidence from the customized resume.
 - Closing: clear interest in moving forward and a professional sign-off.
 
+Mandatory formatting:
+- Separate every block with one blank line.
+- Do not return the cover letter as one continuous paragraph.
+- Keep the greeting on its own line.
+- Keep each paragraph as its own block.
+- End with exactly this sign-off format, with the name on a separate line:
+
+Sincerely,
+
+{customized_resume.name}
+
 Writing rules:
 - Mention the company and job title naturally when possible.
 - Focus on why this candidate is a strong fit, not on repeating the full resume.
 - Prefer concrete evidence over buzzwords.
-- Keep the tone warm, capable, and natural.
+- Keep the tone warm, capable, and natural, but not fancy.
+- Use common words. Prefer "used", "built", "worked on", "improved", and "helped" over formal words like "leveraged", "spearheaded", "orchestrated", "harnessed", or "utilized".
+- Avoid phrases like "I am thrilled", "I am excited to bring", "proven track record", "dynamic", "results-oriented", "robust", "cutting-edge", "seamlessly", "transformative", and "uniquely positioned".
 - Avoid generic clichés such as "I am writing to express my interest" unless phrased naturally.
+- Keep each paragraph short, around 2 to 4 sentences.
 - No bullet points.
 
 Return only the final cover letter text.
 """.strip()
 
 
+def _split_sentences(text: str) -> list[str]:
+    return [sentence.strip() for sentence in re.split(r"(?<=[.!?])\s+", text) if sentence.strip()]
+
+
+def _chunk_sentences(sentences: list[str], target_blocks: int = 3) -> list[str]:
+    if not sentences:
+        return []
+    block_count = min(target_blocks, len(sentences))
+    blocks: list[str] = []
+    for index in range(block_count):
+        start = round(index * len(sentences) / block_count)
+        end = round((index + 1) * len(sentences) / block_count)
+        block = " ".join(sentences[start:end]).strip()
+        if block:
+            blocks.append(block)
+    return blocks
+
+
+def _normalize_cover_letter_text(cover_letter_text: str, applicant_name: str) -> str:
+    """
+    Keep cover letters readable even when an LLM returns cramped text.
+
+    Gemini sometimes returns a valid JSON string but collapses paragraphs or puts
+    "Sincerely" and the candidate name on one line. This normalizer protects the
+    saved text and the rendered PDF from that formatting drift.
+    """
+    text = str(cover_letter_text or "").strip()
+    if not text:
+        return ""
+
+    text = re.sub(r"^```(?:json|text)?\s*|\s*```$", "", text, flags=re.IGNORECASE).strip()
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    if "\\n" in text and "\n" not in text:
+        text = text.replace("\\n", "\n")
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n[ \t]+", "\n", text)
+
+    name = str(applicant_name or "").strip()
+    signoff_pattern = re.compile(
+        r"(?is)\b(Sincerely|Best regards|Kind regards|Regards|Thank you),?\s*"
+        r"([A-Za-z][A-Za-z .'-]{1,80})?\s*$"
+    )
+    signoff_match = signoff_pattern.search(text)
+    body_text = text
+    signoff_word = "Sincerely"
+    signoff_name = name
+    if signoff_match:
+        body_text = text[: signoff_match.start()].strip()
+        signoff_word = signoff_match.group(1).strip() or "Sincerely"
+        detected_name = str(signoff_match.group(2) or "").strip()
+        signoff_name = detected_name or name
+
+    raw_blocks = [
+        re.sub(r"\s+", " ", block).strip()
+        for block in re.split(r"\n\s*\n+", body_text)
+        if block.strip()
+    ]
+
+    blocks: list[str]
+    if len(raw_blocks) >= 2:
+        blocks = raw_blocks
+    else:
+        compact_body = re.sub(r"\s+", " ", body_text).strip()
+        greeting_match = re.match(r"(?is)^(Dear\s+[^,.!?:]+[:,])\s*(.*)$", compact_body)
+        greeting = ""
+        remaining_body = compact_body
+        if greeting_match:
+            greeting = greeting_match.group(1).strip()
+            remaining_body = greeting_match.group(2).strip()
+
+        blocks = [greeting] if greeting else []
+        blocks.extend(_chunk_sentences(_split_sentences(remaining_body), target_blocks=3))
+
+    cleaned_blocks = [block for block in blocks if block]
+    if signoff_name:
+        cleaned_blocks.extend([f"{signoff_word},", signoff_name])
+    else:
+        cleaned_blocks.append(f"{signoff_word},")
+
+    return "\n\n".join(cleaned_blocks).strip()
+
+
 def generate_cover_letter(job_details: Dict[str, Any], customized_resume: Resume) -> str:
     prompt = _build_cover_letter_prompt(job_details, customized_resume)
     system_prompt = """
-You are an expert software-engineering cover letter writer and a precise JSON generator.
+You are a practical software-engineering cover letter writer and a precise JSON generator.
 
 Rules:
 - Return exactly one valid JSON object matching the required schema.
@@ -159,15 +257,56 @@ Rules:
 - Do not repeat the resume line by line.
 - Do not invent unsupported facts.
 - Keep the cover letter concise, human, specific, and ATS-friendly.
+- Use plain English. Avoid over-polished AI language, buzzwords, dramatic enthusiasm, and formal corporate phrasing.
 """.strip()
 
-    llm_output = primary_client.generate_content(
-        prompt=prompt,
-        system_prompt=system_prompt,
-        temperature=0.8,
-        response_format=CoverLetterOutput,
+    try:
+        llm_output = primary_client.generate_content(
+            prompt=prompt,
+            system_prompt=system_prompt,
+            temperature=0.45,
+            response_format=CoverLetterOutput,
+        )
+    except Exception as exc:
+        if not _is_retryable_cover_letter_llm_error(exc):
+            raise
+        logging.warning(
+            "Primary cover-letter model failed with a temporary provider error. "
+            "Retrying once with the Gemini fallback pool. Error: %s",
+            exc,
+        )
+        time.sleep(2)
+        llm_output = primary_client.generate_content(
+            prompt=prompt,
+            system_prompt=system_prompt,
+            temperature=0.45,
+            response_format=CoverLetterOutput,
+            model_override="gemini",
+        )
+
+    parsed_output = CoverLetterOutput.model_validate_json(llm_output)
+    return _normalize_cover_letter_text(parsed_output.cover_letter, customized_resume.name)
+
+
+def _is_retryable_cover_letter_llm_error(exc: Exception) -> bool:
+    error_text = str(exc).lower()
+    return any(
+        marker in error_text
+        for marker in (
+            "500",
+            "502",
+            "503",
+            "504",
+            "serviceunavailable",
+            "service unavailable",
+            "currently unavailable",
+            "temporarily unavailable",
+            "status\": \"unavailable",
+            "timeout",
+            "timed out",
+            "connection error",
+        )
     )
-    return CoverLetterOutput.model_validate_json(llm_output).cover_letter.strip()
 
 
 def generate_cover_letter_for_job(job_id: str, email_override: str | None = None) -> int:
@@ -212,6 +351,7 @@ def generate_cover_letter_for_job(job_id: str, email_override: str | None = None
         email=_resolve_contact_email(job_record, customized_resume, email_override=email_override),
         phone=customized_resume.phone,
         location=customized_resume.location,
+        linkedin=customized_resume.links.linkedin if customized_resume.links else "",
         cover_letter_text=cover_letter_text,
     )
     if not pdf_bytes:

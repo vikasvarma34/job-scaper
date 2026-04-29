@@ -81,7 +81,10 @@ CREATE TABLE IF NOT EXISTS "public"."jobs" (
     "is_interested" boolean,
     "customized_resume_id" "uuid",
     "provider" "text",
-    "posted_at" timestamp with time zone
+    "posted_at" timestamp with time zone,
+    "experience_required" "text",
+    "job_url" "text",
+    "contact_email_override" "text"
 );
 
 
@@ -553,7 +556,8 @@ CREATE TABLE IF NOT EXISTS "public"."customized_resumes" (
     "links" "jsonb",
     "created_at" timestamp with time zone DEFAULT "now"(),
     "last_updated" timestamp with time zone DEFAULT "now"(),
-    "resume_link" "text"
+    "resume_link" "text",
+    "header_title" "text"
 );
 
 
@@ -584,6 +588,53 @@ ALTER TABLE ONLY "public"."jobs"
 
 
 
+CREATE OR REPLACE FUNCTION "public"."set_updated_at"() RETURNS "trigger"
+    LANGUAGE "plpgsql"
+    AS $$
+BEGIN
+   NEW.updated_at = now();
+   RETURN NEW;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."set_updated_at"() OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "public"."customized_cover_letters" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "job_id" "text" NOT NULL,
+    "customized_resume_id" "uuid" NOT NULL,
+    "company" "text",
+    "job_title" "text",
+    "cover_letter_text" "text" NOT NULL,
+    "cover_letter_link" "text",
+    "llm_model" "text",
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL
+);
+
+
+ALTER TABLE "public"."customized_cover_letters" OWNER TO "postgres";
+
+
+ALTER TABLE ONLY "public"."customized_cover_letters"
+    ADD CONSTRAINT "customized_cover_letters_pkey" PRIMARY KEY ("id");
+
+
+ALTER TABLE ONLY "public"."customized_cover_letters"
+    ADD CONSTRAINT "customized_cover_letters_job_id_key" UNIQUE ("job_id");
+
+
+ALTER TABLE ONLY "public"."customized_cover_letters"
+    ADD CONSTRAINT "customized_cover_letters_job_id_fkey" FOREIGN KEY ("job_id") REFERENCES "public"."jobs"("job_id") ON DELETE CASCADE;
+
+
+ALTER TABLE ONLY "public"."customized_cover_letters"
+    ADD CONSTRAINT "customized_cover_letters_customized_resume_id_fkey" FOREIGN KEY ("customized_resume_id") REFERENCES "public"."customized_resumes"("id") ON DELETE CASCADE;
+
+
+
 
 
 
@@ -604,6 +655,10 @@ CREATE INDEX "idx_jobs_job_title" ON "public"."jobs" USING "btree" ("job_title")
 
 
 
+CREATE INDEX "idx_jobs_job_url" ON "public"."jobs" USING "btree" ("job_url");
+
+
+
 CREATE INDEX "idx_jobs_last_checked" ON "public"."jobs" USING "btree" ("last_checked");
 
 
@@ -620,7 +675,27 @@ CREATE INDEX "idx_jobs_status" ON "public"."jobs" USING "btree" ("status");
 
 
 
+CREATE INDEX "idx_jobs_resume_generation_candidates" ON "public"."jobs" USING "btree" ("status", "job_state", "is_active", "resume_score" DESC, "scraped_at" DESC) WHERE ("customized_resume_id" IS NULL);
+
+
+
+CREATE INDEX "idx_jobs_provider_posted_at" ON "public"."jobs" USING "btree" ("provider", "posted_at" DESC);
+
+
+
+CREATE INDEX "idx_customized_cover_letters_job_id" ON "public"."customized_cover_letters" USING "btree" ("job_id");
+
+
+
+CREATE INDEX "idx_customized_cover_letters_resume_id" ON "public"."customized_cover_letters" USING "btree" ("customized_resume_id");
+
+
+
 CREATE OR REPLACE TRIGGER "update_customized_resumes_last_updated" BEFORE UPDATE ON "public"."customized_resumes" FOR EACH ROW EXECUTE FUNCTION "public"."update_last_updated_column"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_customized_cover_letters_updated_at" BEFORE UPDATE ON "public"."customized_cover_letters" FOR EACH ROW EXECUTE FUNCTION "public"."set_updated_at"();
 
 
 
@@ -633,6 +708,9 @@ ALTER TABLE "public"."customized_resumes" ENABLE ROW LEVEL SECURITY;
 
 
 ALTER TABLE "public"."jobs" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."customized_cover_letters" ENABLE ROW LEVEL SECURITY;
 
 
 
@@ -708,9 +786,19 @@ GRANT ALL ON FUNCTION "public"."update_last_updated_column"() TO "authenticated"
 GRANT ALL ON FUNCTION "public"."update_last_updated_column"() TO "service_role";
 
 
+GRANT ALL ON FUNCTION "public"."set_updated_at"() TO "anon";
+GRANT ALL ON FUNCTION "public"."set_updated_at"() TO "authenticated";
+GRANT ALL ON FUNCTION "public"."set_updated_at"() TO "service_role";
+
+
 GRANT ALL ON TABLE "public"."customized_resumes" TO "anon";
 GRANT ALL ON TABLE "public"."customized_resumes" TO "authenticated";
 GRANT ALL ON TABLE "public"."customized_resumes" TO "service_role";
+
+
+GRANT ALL ON TABLE "public"."customized_cover_letters" TO "anon";
+GRANT ALL ON TABLE "public"."customized_cover_letters" TO "authenticated";
+GRANT ALL ON TABLE "public"."customized_cover_letters" TO "service_role";
 
 
 

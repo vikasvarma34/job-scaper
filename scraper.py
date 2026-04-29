@@ -985,14 +985,8 @@ def _shortlist_with_source_quotas(
         for source, cap in (source_caps or {}).items()
         if int(cap) > 0
     }
-    min_fit_score = int(getattr(config, "LINKEDIN_MIN_SHORTLIST_FIT_SCORE", 0))
 
     unique_candidates = _rank_and_limit_candidates(candidates, 0)
-    if min_fit_score > 0:
-        unique_candidates = [
-            candidate for candidate in unique_candidates
-            if int(candidate.get("local_fit_score") or 0) >= min_fit_score
-        ]
 
     ranked = sorted(unique_candidates, key=_job_rank_tuple, reverse=True)
     selected: list[dict] = []
@@ -1003,7 +997,7 @@ def _shortlist_with_source_quotas(
     def _can_select(job: dict, enforce_source_cap: bool) -> bool:
         provider = _normalize_text(job.get("provider"))
         company = _normalize_text(job.get("company")) or "unknown_company"
-        if company_counts.get(company, 0) >= max_per_company:
+        if max_per_company > 0 and company_counts.get(company, 0) >= max_per_company:
             return False
         if enforce_source_cap and provider in source_caps:
             if source_counts.get(provider, 0) >= source_caps[provider]:
@@ -1115,7 +1109,6 @@ def _fetch_naukri_search_results(search_query: str, location: str) -> list[dict]
             "keyword": search_query,
             "location": primary_location,
             "noOfResults": str(results_per_page),
-            "experience": f"0,{int(getattr(config, 'LINKEDIN_MAX_ALLOWED_MIN_EXPERIENCE_YEARS', 3))}",
             "freshness": str(freshness_days),
             "sort": "f",
             "pageNo": str(page_number),
@@ -1595,10 +1588,8 @@ def process_linkedin_query(
         min_card_fit_score = int(getattr(config, "LINKEDIN_MIN_CARD_FIT_SCORE", 0))
         local_filtered = []
         for card in candidate_cards:
-            if not _is_linkedin_role_allowed(card.get("job_title"), None):
-                continue
             fit_score = _local_job_fit_score(card)
-            if fit_score < min_card_fit_score:
+            if min_card_fit_score > 0 and fit_score < min_card_fit_score:
                 continue
             scored_card = dict(card)
             scored_card["local_fit_score"] = fit_score
@@ -1657,15 +1648,6 @@ def process_linkedin_query(
                 logging.debug(f"Skipping job ID {job_id} due to strict city filter. Location: {location}")
                 continue
 
-            job_title = details.get("job_title")
-            job_level = details.get("level")
-            if not _is_linkedin_role_allowed(job_title, job_level):
-                logging.debug(
-                    f"Skipping job ID {job_id} due to role filter. "
-                    f"Title: {job_title}, Level: {job_level}"
-                )
-                continue
-
             description = details.get('description')
             if description and description.strip(): 
                 if not _passes_experience_requirement(description):
@@ -1685,7 +1667,7 @@ def process_linkedin_query(
                     continue
                 fit_score = _local_job_fit_score(details)
                 min_detail_fit_score = int(getattr(config, "LINKEDIN_MIN_DETAIL_FIT_SCORE", 0))
-                if fit_score < min_detail_fit_score:
+                if min_detail_fit_score > 0 and fit_score < min_detail_fit_score:
                     logging.debug(
                         "Skipping job ID %s due to local fit score %s < %s.",
                         job_id,
@@ -1762,12 +1744,10 @@ def process_naukri_query(
     min_card_fit_score = int(getattr(config, "LINKEDIN_MIN_CARD_FIT_SCORE", 0))
     filtered_cards: list[dict] = []
     for card in candidate_cards:
-        if not _is_linkedin_role_allowed(card.get("job_title"), card.get("level")):
-            continue
         if not _passes_experience_requirement(card.get("description")):
             continue
         fit_score = _local_job_fit_score(card)
-        if fit_score < min_card_fit_score:
+        if min_card_fit_score > 0 and fit_score < min_card_fit_score:
             continue
         scored_card = dict(card)
         scored_card["local_fit_score"] = fit_score
@@ -1787,13 +1767,11 @@ def process_naukri_query(
         details = _fetch_naukri_job_details(card.get("job_id"), search_query=search_query, location=location)
         if not details:
             continue
-        if not _is_linkedin_role_allowed(details.get("job_title"), details.get("level")):
-            continue
         if not _passes_experience_requirement(details.get("description")):
             continue
 
         fit_score = _local_job_fit_score(details)
-        if fit_score < min_detail_fit_score:
+        if min_detail_fit_score > 0 and fit_score < min_detail_fit_score:
             continue
 
         details["local_fit_score"] = fit_score
@@ -2490,22 +2468,30 @@ if __name__ == "__main__":
     existing_match_keys = _collect_job_match_keys(existing_rows)
 
     source_candidate_caps = getattr(config, "SCRAPER_SOURCE_CANDIDATE_LIMITS", None) or {}
+    source_city_candidate_caps = getattr(config, "SCRAPER_SOURCE_CITY_CANDIDATE_LIMITS", None) or {}
     source_final_caps = getattr(config, "SCRAPER_SOURCE_FINAL_CAPS", None) or {}
     target_saved_jobs = int(getattr(config, "TARGET_SAVED_JOBS_PER_RUN", 0) or 0)
-    max_per_company = max(1, int(getattr(config, "LINKEDIN_MAX_JOBS_PER_COMPANY_PER_RUN", 3)))
+    max_per_company = int(getattr(config, "SCRAPER_MAX_JOBS_PER_COMPANY_PER_RUN", 0) or 0)
 
-    logging.info("\n--- Multi-source pass 1/2: LinkedIn + Indeed India ---")
+    logging.info("\n--- Multi-source pass 1/2: LinkedIn ---")
 
     if "linkedin" in config.SCRAPING_SOURCES:
         logging.info("\n--- Starting LinkedIn Job Scraping ---")
         linkedin_seen_ids: set[str] = set()
+        linkedin_total_candidate_limit = int(source_candidate_caps.get("linkedin", 0) or 0)
+        linkedin_city_candidate_limit = int(
+            source_city_candidate_caps.get("linkedin", linkedin_total_candidate_limit)
+            or linkedin_total_candidate_limit
+        )
+        if linkedin_total_candidate_limit > 0:
+            linkedin_city_candidate_limit = min(linkedin_city_candidate_limit, linkedin_total_candidate_limit)
         linkedin_candidates = _collect_multilocation_source_candidates(
             source_name="linkedin",
             locations=getattr(config, "LINKEDIN_LOCATIONS", None) or [config.LINKEDIN_LOCATION],
             search_queries=getattr(config, "LINKEDIN_SEARCH_QUERIES", None) or [],
             expanded_search_queries=getattr(config, "LINKEDIN_EXPANDED_SEARCH_QUERIES", None) or [],
             max_jobs_per_search=config.MAX_JOBS_PER_SEARCH.get("linkedin", getattr(config, "DEFAULT_MAX_JOBS_PER_SEARCH", 10)),
-            candidate_limit=int(source_candidate_caps.get("linkedin", 0) or 0),
+            candidate_limit=linkedin_city_candidate_limit,
             query_processor=process_linkedin_query,
             seen_job_ids=linkedin_seen_ids,
             existing_job_ids=existing_job_ids,
@@ -2518,6 +2504,33 @@ if __name__ == "__main__":
         )
         all_candidates.extend(linkedin_candidates)
         _log_source_pool("linkedin", linkedin_candidates)
+
+        linkedin_remaining_capacity = max(
+            0,
+            linkedin_total_candidate_limit - len(linkedin_candidates),
+        )
+        linkedin_broad_locations = getattr(config, "LINKEDIN_BROAD_LOCATIONS", None) or []
+        if linkedin_remaining_capacity > 0 and linkedin_broad_locations:
+            logging.info("\n--- Starting LinkedIn Broad India/Remote Pass ---")
+            linkedin_broad_candidates = _collect_multilocation_source_candidates(
+                source_name="linkedin_broad",
+                locations=linkedin_broad_locations,
+                search_queries=getattr(config, "LINKEDIN_SEARCH_QUERIES", None) or [],
+                expanded_search_queries=getattr(config, "LINKEDIN_EXPANDED_SEARCH_QUERIES", None) or [],
+                max_jobs_per_search=config.MAX_JOBS_PER_SEARCH.get("linkedin", getattr(config, "DEFAULT_MAX_JOBS_PER_SEARCH", 10)),
+                candidate_limit=linkedin_remaining_capacity,
+                query_processor=process_linkedin_query,
+                seen_job_ids=linkedin_seen_ids,
+                existing_job_ids=existing_job_ids,
+                existing_match_keys=existing_match_keys,
+                seen_match_keys=seen_job_match_keys_in_run,
+                extra_query_kwargs={
+                    "geo_id_override": USE_CONFIG_GEO_ID,
+                    "enforce_location_filter": False,
+                },
+            )
+            all_candidates.extend(linkedin_broad_candidates)
+            _log_source_pool("linkedin_broad", linkedin_broad_candidates)
     else:
         logging.info("\n--- Skipping LinkedIn Job Scraping per config ---")
 
@@ -2546,13 +2559,20 @@ if __name__ == "__main__":
     if "naukri" in config.SCRAPING_SOURCES:
         logging.info("\n--- Starting Naukri Job Scraping ---")
         naukri_seen_ids: set[str] = set()
+        naukri_total_candidate_limit = int(source_candidate_caps.get("naukri", 0) or 0)
+        naukri_city_candidate_limit = int(
+            source_city_candidate_caps.get("naukri", naukri_total_candidate_limit)
+            or naukri_total_candidate_limit
+        )
+        if naukri_total_candidate_limit > 0:
+            naukri_city_candidate_limit = min(naukri_city_candidate_limit, naukri_total_candidate_limit)
         naukri_candidates = _collect_multilocation_source_candidates(
             source_name="naukri",
             locations=getattr(config, "NAUKRI_LOCATIONS", None) or getattr(config, "LINKEDIN_LOCATIONS", None) or [config.LINKEDIN_LOCATION],
             search_queries=getattr(config, "NAUKRI_SEARCH_QUERIES", None) or getattr(config, "LINKEDIN_SEARCH_QUERIES", None) or [],
             expanded_search_queries=getattr(config, "NAUKRI_EXPANDED_SEARCH_QUERIES", None) or [],
             max_jobs_per_search=config.MAX_JOBS_PER_SEARCH.get("naukri", getattr(config, "DEFAULT_MAX_JOBS_PER_SEARCH", 10)),
-            candidate_limit=int(source_candidate_caps.get("naukri", 0) or 0),
+            candidate_limit=naukri_city_candidate_limit,
             query_processor=process_naukri_query,
             seen_job_ids=naukri_seen_ids,
             existing_job_ids=existing_job_ids,
@@ -2561,6 +2581,29 @@ if __name__ == "__main__":
         )
         all_candidates.extend(naukri_candidates)
         _log_source_pool("naukri", naukri_candidates)
+
+        naukri_remaining_capacity = max(
+            0,
+            naukri_total_candidate_limit - len(naukri_candidates),
+        )
+        naukri_broad_locations = getattr(config, "NAUKRI_BROAD_LOCATIONS", None) or []
+        if naukri_remaining_capacity > 0 and naukri_broad_locations:
+            logging.info("\n--- Starting Naukri Broad India Pass ---")
+            naukri_broad_candidates = _collect_multilocation_source_candidates(
+                source_name="naukri_broad",
+                locations=naukri_broad_locations,
+                search_queries=getattr(config, "NAUKRI_SEARCH_QUERIES", None) or getattr(config, "LINKEDIN_SEARCH_QUERIES", None) or [],
+                expanded_search_queries=getattr(config, "NAUKRI_EXPANDED_SEARCH_QUERIES", None) or [],
+                max_jobs_per_search=config.MAX_JOBS_PER_SEARCH.get("naukri", getattr(config, "DEFAULT_MAX_JOBS_PER_SEARCH", 10)),
+                candidate_limit=naukri_remaining_capacity,
+                query_processor=process_naukri_query,
+                seen_job_ids=naukri_seen_ids,
+                existing_job_ids=existing_job_ids,
+                existing_match_keys=existing_match_keys,
+                seen_match_keys=seen_job_match_keys_in_run,
+            )
+            all_candidates.extend(naukri_broad_candidates)
+            _log_source_pool("naukri_broad", naukri_broad_candidates)
     else:
         logging.info("\n--- Skipping Naukri Job Scraping per config ---")
 
@@ -2573,10 +2616,10 @@ if __name__ == "__main__":
 
     if final_jobs:
         logging.info(
-            "Saving %s final shortlisted jobs to Supabase (target=%s, max_per_company=%s).",
+            "Saving %s final shortlisted jobs to Supabase (target=%s, scraper max_per_company=%s).",
             len(final_jobs),
             target_saved_jobs,
-            max_per_company,
+            max_per_company or "disabled",
         )
         total_new_jobs_saved = supabase_utils.save_jobs_to_supabase(final_jobs)
         if total_new_jobs_saved != len(final_jobs):

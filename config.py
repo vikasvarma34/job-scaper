@@ -78,7 +78,7 @@ SCORING_LOG_REASONING_TRACE = str(os.environ.get("SCORING_LOG_REASONING_TRACE", 
     "on",
 }
 RESUME_GENERATION_FLOW = "legacy"  # Options: "legacy", "two_step_ai"
-TARGET_SAVED_JOBS_PER_RUN = 100
+TARGET_SAVED_JOBS_PER_RUN = 500
 SCRAPER_LOG_LEVEL = "INFO"  # Use "DEBUG" only when you want full request-by-request tracing.
 
 # --- Search Configuration ---
@@ -107,6 +107,10 @@ LINKEDIN_LOCATIONS = [
     "Chennai, Tamil Nadu, India",
     "Delhi, India",
 ]
+LINKEDIN_BROAD_LOCATIONS = [
+    "India",
+    "Remote, India",
+]
 # Optional geoId. Set None when using LINKEDIN_LOCATIONS to avoid country-wide overriding.
 LINKEDIN_GEO_ID = None
 # Priority behavior:
@@ -116,7 +120,7 @@ LINKEDIN_GEO_ID = None
 LINKEDIN_ENABLE_SECONDARY_CITY_FALLBACK = True
 # Legacy LinkedIn-only target. Multi-source runs now use TARGET_SAVED_JOBS_PER_RUN
 # together with SCRAPER_SOURCE_FINAL_CAPS below.
-LINKEDIN_MAX_NEW_JOBS_PER_RUN = 45
+LINKEDIN_MAX_NEW_JOBS_PER_RUN = TARGET_SAVED_JOBS_PER_RUN
 # Do not move to the next city until the current city has failed to reach this target.
 LINKEDIN_MIN_TARGET_JOBS_BEFORE_NEXT_CITY = LINKEDIN_MAX_NEW_JOBS_PER_RUN
 # If the initial query set for a city underperforms, try broader backup queries in the same city first.
@@ -224,13 +228,13 @@ LINKEDIN_ALLOWED_LEVEL_KEYWORDS = [
     "junior",
 ]
 LINKEDIN_JOB_TYPE = "F" # F=Full-time, C=Contract, P=Part-time, T=Temporary, I=Internship
-LINKEDIN_JOB_POSTING_DATE = "r86400" # r86400=Past 24h, r604800=Past week
+LINKEDIN_JOB_POSTING_DATE = "r259200" # r86400=Past 24h, r259200=Past 3 days, r604800=Past week
 LINKEDIN_F_WT = None # Set 1=Onsite, 2=Remote, 3=Hybrid, or None for all
 # Prefilter controls to reduce wasted detail-fetch calls.
-LINKEDIN_PREFILTER_BY_TITLE_BEFORE_DETAILS = True
-LINKEDIN_MIN_CARD_FIT_SCORE = 3
-LINKEDIN_MIN_DETAIL_FIT_SCORE = 5
-LINKEDIN_MIN_SHORTLIST_FIT_SCORE = 5
+LINKEDIN_PREFILTER_BY_TITLE_BEFORE_DETAILS = False
+LINKEDIN_MIN_CARD_FIT_SCORE = 0
+LINKEDIN_MIN_DETAIL_FIT_SCORE = 0
+LINKEDIN_MIN_SHORTLIST_FIT_SCORE = 0
 # Reject only when the stated minimum required experience is above this value.
 # Examples allowed: 0+, 1+, 2+, 2-3, 2-4, 2-5, 3 years, 3+ years.
 # Examples rejected: 4 years, 4+ years, 5-7 years.
@@ -242,8 +246,8 @@ LINKEDIN_ENABLE_LLM_TITLE_PREFILTER = False
 LINKEDIN_LLM_PREFILTER_CANDIDATE_CAP = 180
 LINKEDIN_LLM_PREFILTER_TOP_K = 80
 # Final shortlist controls (applied after gathering candidate pool across queries).
-LINKEDIN_FINAL_SHORTLIST_CANDIDATE_LIMIT = 320
-LINKEDIN_MAX_JOBS_PER_COMPANY_PER_RUN = 3
+LINKEDIN_FINAL_SHORTLIST_CANDIDATE_LIMIT = TARGET_SAVED_JOBS_PER_RUN
+LINKEDIN_MAX_JOBS_PER_COMPANY_PER_RUN = 5
 LINKEDIN_STRICT_COMPANY_DIVERSITY = False
 LINKEDIN_ENABLE_LLM_FINAL_SHORTLIST = False
 LINKEDIN_LLM_FINAL_SHORTLIST_CANDIDATE_CAP = 240
@@ -251,28 +255,28 @@ LINKEDIN_LLM_FINAL_SHORTLIST_CANDIDATE_CAP = 240
 NAUKRI_SEARCH_QUERIES = LINKEDIN_SEARCH_QUERIES
 NAUKRI_EXPANDED_SEARCH_QUERIES = LINKEDIN_EXPANDED_SEARCH_QUERIES
 NAUKRI_LOCATIONS = LINKEDIN_LOCATIONS
+NAUKRI_BROAD_LOCATIONS = ["India"]
 NAUKRI_RESULTS_PER_PAGE = 20
 NAUKRI_MAX_PAGES_PER_QUERY = 2
-NAUKRI_FRESHNESS_DAYS = 1
+NAUKRI_FRESHNESS_DAYS = 3
 
 INDEED_INDIA_SEARCH_QUERIES = LINKEDIN_SEARCH_QUERIES
 INDEED_INDIA_LOCATIONS = LINKEDIN_LOCATIONS
 
 SCRAPER_SOURCE_CANDIDATE_LIMITS = {
-    "linkedin": 220,
-    "naukri": 35,
-    "indeed_india": 120,
+    "linkedin": 400,
+    "naukri": 150,
 }
-SCRAPER_SOURCE_FINAL_CAPS = {
-    "linkedin": 75,
-    "naukri": 10,
-    "indeed_india": 25,
+SCRAPER_SOURCE_CITY_CANDIDATE_LIMITS = {
+    "linkedin": 300,
+    "naukri": 100,
 }
-SCRAPER_ENFORCE_STRICT_SOURCE_CAPS = True
+SCRAPER_SOURCE_FINAL_CAPS = {}
+SCRAPER_ENFORCE_STRICT_SOURCE_CAPS = False
+SCRAPER_MAX_JOBS_PER_COMPANY_PER_RUN = 0
 SCRAPER_SOURCE_PRIORITY = {
     "linkedin": 5,
     "naukri": 1,
-    "indeed_india": 4,
 }
 
 CAREERS_FUTURE_SEARCH_QUERIES = ["IT Support", "Full Stack Web Developer", "Application Support", "Cybersecurity Analyst", "fresher developer"]
@@ -280,18 +284,20 @@ CAREERS_FUTURE_SEARCH_CATEGORIES = ["Information Technology"]
 CAREERS_FUTURE_SEARCH_EMPLOYMENT_TYPES = ["Full Time"]
 
 # --- Processing Limits ---
-SCRAPING_SOURCES = ["linkedin", "naukri", "indeed_india"] # "linkedin", "naukri", "indeed_india", "careers_future"
+SCRAPING_SOURCES = ["linkedin", "naukri"] # "linkedin", "naukri", "indeed_india", "careers_future"
 # Set 0 to score all unscored jobs currently in Supabase.
 JOBS_TO_SCORE_PER_RUN = 0
-JOBS_TO_CUSTOMIZE_PER_RUN = 20
-MIN_SCORE_FOR_CUSTOM_RESUME = 85
+JOBS_TO_CUSTOMIZE_PER_RUN = 0
+MIN_SCORE_FOR_CUSTOM_RESUME = 80
+RESUME_MAX_JOBS_PER_COMPANY_PER_RUN = 5
+RESUME_GENERATION_SAFETY_CAP = 50
 # Optional percent mode for custom resume generation.
 # 0 = disabled (uses JOBS_TO_CUSTOMIZE_PER_RUN).
 # Example: set to 20 for "top 20%" of currently eligible scored jobs.
 JOBS_TO_CUSTOMIZE_TOP_PERCENT = 0
 MAX_JOBS_PER_SEARCH = {
-    "linkedin": 24,
-    "naukri": 8,
+    "linkedin": 50,
+    "naukri": 20,
     "indeed_india": 20,
     "careers_future": 10,
 }

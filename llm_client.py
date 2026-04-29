@@ -371,25 +371,43 @@ class LLMClient:
                     "429", "rate_limit", "rate limit", "resource_exhausted",
                     "quota", "too many requests", "retry"
                 ])
+                is_transient_provider_error = any(keyword in error_str for keyword in [
+                    "500",
+                    "502",
+                    "503",
+                    "504",
+                    "serviceunavailable",
+                    "service unavailable",
+                    "temporarily unavailable",
+                    "currently unavailable",
+                    "status\": \"unavailable",
+                    "internal server error",
+                    "bad gateway",
+                    "gateway timeout",
+                    "timeout",
+                    "timed out",
+                    "connection error",
+                    "connection reset",
+                ])
 
-                if is_rate_limit and attempt < max_attempts - 1:
+                if (is_rate_limit or is_transient_provider_error) and attempt < max_attempts - 1:
                     if is_dynamic_gemini:
                         pool_index += 1
                         delay = random.uniform(1, 4) # Short delay when switching models
                         logger.warning(
-                            f"Rate limit hit for {current_model}. Switching to next pool model... "
+                            f"Retryable LLM error for {current_model}. Switching to next pool model... "
                             f"(attempt {attempt + 1}/{max_attempts}). Retrying in {delay:.1f}s. Error: {e}"
                         )
                     else:
                         # Exponential backoff with jitter
                         delay = self.retry_base_delay * (2 ** attempt) + random.uniform(0, 5)
                         logger.warning(
-                            f"Rate limit hit (attempt {attempt + 1}/{max_attempts}). "
+                            f"Retryable LLM error (attempt {attempt + 1}/{max_attempts}). "
                             f"Retrying in {delay:.1f}s... Error: {e}"
                         )
                     time.sleep(delay)
                     continue
-                elif not is_rate_limit:
+                elif not is_rate_limit and not is_transient_provider_error:
                     # Non-rate-limit error — don't retry
                     logger.error(f"LLM API error (non-retryable) on model {current_model if 'current_model' in locals() else model}: {e}")
                     raise
