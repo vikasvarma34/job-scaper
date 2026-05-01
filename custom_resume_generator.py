@@ -8,6 +8,8 @@ import pdf_generator
 import re
 import asyncio 
 import math
+import io
+import pdfplumber
 import resume_validator
 import requests
 from llm_client import primary_client
@@ -22,6 +24,29 @@ import os
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 RESUME_GENERATION_TEMPERATURE = 0.6
+RESUME_MODE_ONE_PAGE = "one_page"
+RESUME_MODE_PROJECTS = "project_mode"
+SUPPORTED_RESUME_MODES = {RESUME_MODE_ONE_PAGE, RESUME_MODE_PROJECTS}
+
+
+def _normalize_resume_mode(value: Any) -> str:
+    mode = str(value or "").strip().lower().replace("-", "_")
+    aliases = {
+        "default": RESUME_MODE_ONE_PAGE,
+        "onepage": RESUME_MODE_ONE_PAGE,
+        "one_page": RESUME_MODE_ONE_PAGE,
+        "no_projects": RESUME_MODE_ONE_PAGE,
+        "compact": RESUME_MODE_ONE_PAGE,
+        "projects": RESUME_MODE_PROJECTS,
+        "project": RESUME_MODE_PROJECTS,
+        "project_mode": RESUME_MODE_PROJECTS,
+        "include_projects": RESUME_MODE_PROJECTS,
+    }
+    return aliases.get(mode, RESUME_MODE_ONE_PAGE)
+
+
+def _resume_mode_label(mode: str) -> str:
+    return "Project Mode" if _normalize_resume_mode(mode) == RESUME_MODE_PROJECTS else "One-Page Mode"
 
 
 def _log_keyword_plan_response(job_id: Any, llm_output: str) -> None:
@@ -544,6 +569,170 @@ def _normalize_personalized_resume_output(
     return normalized_resume
 
 
+def _apply_resume_mode_constraints(resume: Resume, resume_mode: str) -> Resume:
+    """
+    Enforce section-level choices that should not depend on model obedience.
+    """
+    constrained_resume = resume.model_copy(deep=True)
+    if _normalize_resume_mode(resume_mode) == RESUME_MODE_ONE_PAGE:
+        constrained_resume.projects = []
+        constrained_resume.skills = constrained_resume.skills[:8]
+        for experience in constrained_resume.experience:
+            lines = _split_bullet_ready_lines(experience.description)
+            if len(lines) > 8:
+                experience.description = "\n".join(lines[:8])
+    else:
+        for project in constrained_resume.projects:
+            lines = _split_bullet_ready_lines(project.description)
+            if len(lines) > 3:
+                project.description = "\n".join(lines[:3])
+    return constrained_resume
+
+
+def _count_pdf_pages(pdf_bytes: bytes) -> int:
+    if not pdf_bytes:
+        return 0
+    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+        return len(pdf.pages)
+
+
+def _truncate_words(text: str, max_words: int) -> str:
+    words = str(text or "").split()
+    if len(words) <= max_words:
+        return str(text or "").strip()
+    return " ".join(words[:max_words]).rstrip(" ,;:") + "."
+
+
+def _compact_summary(text: str, max_sentences: int, max_words: int) -> str:
+    sentences = [
+        sentence.strip()
+        for sentence in re.split(r"(?<=[.!?])\s+", str(text or "").strip())
+        if sentence.strip()
+    ]
+    compact = " ".join(sentences[:max_sentences]) if sentences else str(text or "").strip()
+    return _truncate_words(compact, max_words)
+
+
+def _compact_description(text: str, max_bullets: int, max_words_per_bullet: int) -> str:
+    compact_lines = []
+    for line in _split_bullet_ready_lines(text)[:max_bullets]:
+        compact_line = _truncate_words(line, max_words_per_bullet)
+        if compact_line:
+            compact_lines.append(compact_line)
+    return "\n".join(compact_lines)
+
+
+def _compact_resume_for_one_page_attempt(resume: Resume, attempt: int) -> Resume:
+    """
+    Apply progressively stricter one-page constraints. This protects the product
+    promise even when an LLM returns content that is longer than requested.
+    """
+    compact_resume = resume.model_copy(deep=True)
+    compact_resume.projects = []
+
+    strategies = [
+        {"skills": 8, "bullets": 8, "bullet_words": 32, "summary_sentences": 5, "summary_words": 84},
+        {"skills": 8, "bullets": 8, "bullet_words": 26, "summary_sentences": 4, "summary_words": 68},
+        {"skills": 7, "bullets": 7, "bullet_words": 27, "summary_sentences": 4, "summary_words": 62},
+        {"skills": 6, "bullets": 7, "bullet_words": 24, "summary_sentences": 3, "summary_words": 54},
+        {"skills": 6, "bullets": 6, "bullet_words": 22, "summary_sentences": 3, "summary_words": 48},
+        {"skills": 5, "bullets": 5, "bullet_words": 20, "summary_sentences": 2, "summary_words": 40},
+    ]
+    strategy = strategies[min(attempt, len(strategies) - 1)]
+
+    compact_resume.summary = _compact_summary(
+        compact_resume.summary,
+        max_sentences=strategy["summary_sentences"],
+        max_words=strategy["summary_words"],
+    )
+    compact_resume.skills = compact_resume.skills[: strategy["skills"]]
+    for experience in compact_resume.experience:
+        experience.description = _compact_description(
+            experience.description,
+            max_bullets=strategy["bullets"],
+            max_words_per_bullet=strategy["bullet_words"],
+        )
+    return compact_resume
+
+
+def _fallback_projects_for_project_mode(
+    base_resume: Resume,
+    keyword_plan: ATSKeywordPlan,
+    max_projects: int = 1,
+) -> list:
+    """
+    Project Mode should visibly include project proof. If the model returns no
+    projects, choose the base project with the strongest keyword overlap.
+    """
+    if not base_resume.projects:
+        return []
+
+    keywords = {
+        str(keyword or "").strip().lower()
+        for keyword in list(keyword_plan.hard_skills) + list(keyword_plan.soft_skills)
+        if str(keyword or "").strip()
+    }
+
+    scored_projects = []
+    for index, project in enumerate(base_resume.projects):
+        project_text = " ".join(
+            [
+                str(project.name or ""),
+                str(project.description or ""),
+                " ".join(project.technologies or []),
+            ]
+        ).lower()
+        score = sum(1 for keyword in keywords if keyword and keyword in project_text)
+        scored_projects.append((score, -index, project))
+
+    scored_projects.sort(reverse=True, key=lambda item: (item[0], item[1]))
+    return [
+        project.model_copy(deep=True) if hasattr(project, "model_copy") else project
+        for _, _, project in scored_projects[:max_projects]
+    ]
+
+
+def create_resume_pdf_for_mode(
+    resume_data: Resume,
+    header_title: str | None = None,
+    resume_mode: str = RESUME_MODE_ONE_PAGE,
+) -> tuple[Resume, bytes]:
+    """
+    Render a resume PDF and enforce the one-page product promise in one_page mode.
+    """
+    selected_resume_mode = _normalize_resume_mode(resume_mode)
+    normalized_resume = _apply_resume_mode_constraints(resume_data, selected_resume_mode)
+
+    if selected_resume_mode != RESUME_MODE_ONE_PAGE:
+        return normalized_resume, pdf_generator.create_resume_pdf(
+            normalized_resume,
+            header_title=header_title,
+        )
+
+    last_pdf_bytes = b""
+    last_resume = normalized_resume
+    for attempt in range(5):
+        candidate_resume = _compact_resume_for_one_page_attempt(normalized_resume, attempt)
+        pdf_bytes = pdf_generator.create_resume_pdf(
+            candidate_resume,
+            header_title=header_title,
+        )
+        page_count = _count_pdf_pages(pdf_bytes)
+        logging.info(
+            "One-page fit attempt %s produced %s page(s).",
+            attempt + 1,
+            page_count,
+        )
+        last_pdf_bytes = pdf_bytes
+        last_resume = candidate_resume
+        if page_count <= 1:
+            return candidate_resume, pdf_bytes
+
+    raise ValueError(
+        "One-page resume mode could not fit the resume into one page after strict compaction."
+    )
+
+
 async def generate_keyword_plan_with_llm(
     job_details: Dict[str, Any],
 ) -> ATSKeywordPlan:
@@ -552,13 +741,13 @@ async def generate_keyword_plan_with_llm(
     from the job description only.
     """
     prompt = f"""
-    Extract the important resume keywords from this target software engineering job.
+    Extract the important resume keywords from this target technology job.
 
     Target job:
     {_serialize_job_for_prompt(job_details)}
 
     Return only two arrays:
-    - hard_skills: named technical skills, tools, technologies, frameworks, platforms, databases, APIs, testing keywords, cloud/devops/security items, and concise named engineering methods from the job description
+    - hard_skills: named technical skills, tools, technologies, languages, frameworks, UI libraries, platforms, databases, APIs, testing keywords, cloud/devops/security items, AI/LLM/data items, design or engineering methods, and concise role-specific practices from the job description
     - soft_skills: concise interpersonal, collaboration, ownership, communication, problem-solving, teamwork, leadership, or execution traits from the job description
 
     Rules:
@@ -566,10 +755,10 @@ async def generate_keyword_plan_with_llm(
     - Do not compare against the resume.
     - Do not explain anything.
     - Do not add extra fields.
-    - Keep the lists concise, useful, ATS-friendly, and suitable for a software-engineering resume rewrite.
+    - Keep the lists concise, useful, ATS-friendly, and suitable for a technology resume rewrite across frontend, backend, full stack, AI/LLM, testing, cloud/devops, data, and general software roles.
     - Prefer exact or near-exact job wording where helpful.
     - Remove obvious duplicates.
-    - Hard skills must be resume-usable technical keywords, not broad responsibility phrases or generic capability statements.
+    - Hard skills must be resume-usable technical keywords, named practices, or clearly role-relevant concepts, not broad responsibility phrases or generic capability statements.
     - Soft skills must be short, resume-usable people/work-style traits, not administrative process phrases.
     - Exclude office-productivity tools, generic computer-literacy items, language-fluency requirements, status-reporting phrases, escalation phrases, and other low-signal administrative wording unless they are clearly central to the engineering role.
     - Prefer concrete named technologies and concise named practices over long descriptive phrases.
@@ -577,7 +766,7 @@ async def generate_keyword_plan_with_llm(
     """
 
     system_prompt = """
-    You are a senior resume-targeting strategist for software engineering resumes and a precise JSON generator.
+    You are a senior resume-targeting strategist for technology resumes and a precise JSON generator.
 
     Your task is to convert a target job description into two keyword lists for resume rewriting.
 
@@ -586,7 +775,7 @@ async def generate_keyword_plan_with_llm(
     - Do not output markdown, commentary, or extra text.
     - Use only information present in the provided job details.
     - Treat the job details as the source of truth for target requirements.
-    - Optimize specifically for software engineering, backend, platform, and full-stack job descriptions.
+    - Optimize for frontend, backend, full stack, AI/LLM, testing, cloud/devops, data, and general software job descriptions without favoring one role family by default.
     - Return only hard_skills and soft_skills.
     - Reason privately and output only the final JSON.
     """
@@ -651,6 +840,24 @@ def _derive_clean_header_title(raw_value: Any) -> str:
         return ""
 
     normalized = cleaned.lower()
+    reversed_title_match = re.fullmatch(
+        r"(?i)(developer|engineer|software developer|software engineer)\s*[,/|-]\s*(java|python|go|golang|react|node(?:\.js)?|javascript|typescript|frontend|backend|full stack|fullstack)",
+        cleaned,
+    )
+    if reversed_title_match:
+        role = reversed_title_match.group(1).strip().title()
+        stack = reversed_title_match.group(2).strip()
+        stack_display = {
+            "go": "Go",
+            "golang": "Golang",
+            "node": "Node.js",
+            "node.js": "Node.js",
+            "javascript": "JavaScript",
+            "typescript": "TypeScript",
+            "fullstack": "Full Stack",
+        }.get(stack.lower(), stack.title())
+        return f"{stack_display} {role}"
+
     role_patterns = [
         ("java full stack developer", "Java Full Stack Developer"),
         ("java fullstack developer", "Java Full Stack Developer"),
@@ -697,6 +904,10 @@ def _derive_clean_header_title(raw_value: Any) -> str:
         ("microservice", "Microservices"),
         ("golang", "Golang"),
         ("go ", "Go"),
+        (" go", "Go"),
+        ("python", "Python"),
+        ("javascript", "JavaScript"),
+        ("typescript", "TypeScript"),
         ("sql", "SQL"),
     ]
 
@@ -708,12 +919,29 @@ def _derive_clean_header_title(raw_value: Any) -> str:
 
         max_modifiers = 1 if any(token in base_role.lower() for token in ["full stack", "backend", "java"]) else 2
         if modifiers:
+            if base_role in {"Developer", "Engineer", "Software Developer", "Software Engineer"}:
+                return f"{modifiers[0]} {base_role}"
             return f"{base_role}, {' / '.join(modifiers[:max_modifiers])}"
         return base_role
 
     fallback_parts = re.split(r"\s+\|\s+|\s+-\s+|@", cleaned)
     for part in fallback_parts:
         candidate = " ".join(part.split()).strip(" ,-/")
+        comma_role_match = re.fullmatch(
+            r"(?i)(developer|engineer|software developer|software engineer)\s*,\s*(java|python|go|golang|react|node(?:\.js)?|frontend|backend|full stack|fullstack)",
+            candidate,
+        )
+        if comma_role_match:
+            role = comma_role_match.group(1).strip().title()
+            stack = comma_role_match.group(2).strip()
+            stack_display = {
+                "go": "Go",
+                "golang": "Golang",
+                "node": "Node.js",
+                "node.js": "Node.js",
+                "fullstack": "Full Stack",
+            }.get(stack.lower(), stack.title())
+            return f"{stack_display} {role}"
         if candidate:
             return candidate[:80].strip()
 
@@ -734,12 +962,75 @@ async def rewrite_resume_with_keyword_plan(
     full_resume: Resume,
     job_details: Dict[str, Any],
     keyword_plan: ATSKeywordPlan,
+    resume_mode: str = RESUME_MODE_ONE_PAGE,
 ) -> ATSResumeRewriteOutput:
     """
     Second step of the new AI flow: rewrite the resume using the AI-produced keyword plan.
     """
+    selected_resume_mode = _normalize_resume_mode(resume_mode)
+    output_instructions = """
+    Output constraints
+    - This is the default output for most India-based technology applications.
+    - Target a one-page resume.
+    - Use the page well. Aim for a full but clean one-page resume, not a sparse half-page resume.
+    - Do not include a Projects section. Return projects as an empty array.
+    - Fold only the strongest project/work evidence into Professional Experience where it is useful.
+    - Use 7 or 8 strong experience bullet-ready lines per role.
+    - Include factual quantified results when they are supported by the base resume.
+    - Keep the summary to 4 or 5 short sentences.
+    - Keep skills compact and targeted to the job.
+    - Use 5 to 8 grouped skill lines when they fit naturally.
+    - Do not try to show every available skill or detail.
+    """ if selected_resume_mode == RESUME_MODE_ONE_PAGE else """
+    Output constraints
+    - Include Projects, but keep them concise and relevant.
+    - Use project evidence only when it helps prove job-specific implementation depth.
+    - Experience bullets should be shorter when Projects are included.
+    - Keep each experience item to 4 or 5 strong bullet-ready lines.
+    - Keep each project to 2 or 3 strong bullet-ready lines.
+    - Projects must not repeat experience bullets word for word.
+    - More than one page is acceptable if needed, but keep the resume concise.
+    """
+    summary_instructions = (
+        "- Keep the professional summary to 4 or 5 short sentences that render as roughly 4 lines in the PDF."
+        if selected_resume_mode == RESUME_MODE_ONE_PAGE
+        else "- Keep the professional summary concise, direct, and relevant to the target role."
+    )
+    skills_instructions = (
+        "- Prefer 5 to 8 compact grouped skill lines."
+        if selected_resume_mode == RESUME_MODE_ONE_PAGE
+        else "- Prefer compact grouped skill lines, but include project-relevant technologies when they directly support the target role."
+    )
+    experience_instructions = (
+        "- Write 7 or 8 strong bullet-ready lines."
+        if selected_resume_mode == RESUME_MODE_ONE_PAGE
+        else "- Write 4 or 5 strong bullet-ready lines."
+    )
+    projects_instructions = (
+        """
+    - Return projects as an empty array.
+    - Do not include a Projects section.
+    - If project/work evidence is important, fold only the strongest points into Professional Experience.
+        """.strip()
+        if selected_resume_mode == RESUME_MODE_ONE_PAGE
+        else """
+    - Keep only projects that strongly support the target role.
+    - Keep each selected project's name unchanged.
+    - Write 2 or 3 strong bullet-ready lines per selected project.
+    - Highlight relevant implementation, integrations, and outcomes evidenced by the base resume.
+    - You may refine each project's technologies list by removing weaker or less relevant items already present in the base resume.
+    - Use hard_skills from the first pass when they fit naturally with the project and improve ATS match.
+    - Projects must not repeat the same CliniScripts or TELUS claims already used in Professional Experience.
+        """.strip()
+    )
+    keyword_distribution_instruction = (
+        "- Distribute hard_skills across summary, skills, and experience where they fit naturally."
+        if selected_resume_mode == RESUME_MODE_ONE_PAGE
+        else "- Distribute hard_skills across summary, skills, experience, and projects where they fit naturally."
+    )
+
     prompt = f"""
-    Rewrite the base resume for this target software engineering job using the keyword strategy.
+    Rewrite the base resume for this target technology job using the keyword strategy.
 
     Target job:
     {_serialize_job_for_prompt(job_details)}
@@ -751,7 +1042,9 @@ async def rewrite_resume_with_keyword_plan(
     {_serialize_resume_for_prompt(full_resume)}
 
     Primary objective:
-    Produce a stronger, more relevant, ATS-friendly software engineering resume that improves match quality for this job.
+    Produce a stronger, more relevant, ATS-friendly technology resume that improves match quality for this job.
+
+    {output_instructions}
 
     Order of priority:
     1. role relevance and ATS match for the target job
@@ -765,6 +1058,20 @@ async def rewrite_resume_with_keyword_plan(
     General
     - Treat the base resume as the source of truth for concrete employment history, project history, dates, titles, companies, and measurable outcomes already written there.
     - CRITICAL INSTRUCTION: The first-pass hard_skills and soft_skills are user-verified skills. The candidate has actually performed these skills in real work. You are explicitly authorized and encouraged to incorporate them naturally into the resume even if they are not explicitly written or mentioned anywhere in the current base resume wording. These are not made-up skills — the user has confirmed the candidate possesses them.
+    - The user selects jobs manually or through scoring after reviewing fit. Treat the selected job as user-verified for fit.
+    - Do not spend effort judging whether the candidate can do the job. Use the job description as the target direction.
+    - Use job-description skills and wording as user-verified targeting guidance, especially in the summary and skills section.
+    - Think like an HR recruiter first: the resume should quickly show the target role, primary stack or toolset, believable work evidence, and measurable impact.
+    - Do not let job keywords override the candidate's core identity. Use the target job to choose emphasis, but keep the resume believable for a 2+ year software engineer with backend, full-stack, frontend, cloud, integration, and AI-enabled product experience.
+    - First identify the target role family from the job description, such as frontend/UI, React, Angular, JavaScript/TypeScript, Java backend, Python backend, Go backend, full stack, AI/LLM, cloud/devops, QA/testing, data, platform, or general software engineer.
+    - Make the header_title a natural resume title for that role family. Convert awkward job-board titles into normal titles, such as "Developer, Java" -> "Java Developer".
+    - Align the summary, skills, and first experience bullets to that role family.
+    - If the role is frontend or UI-focused, lead with React/JavaScript/TypeScript, UI features, responsive interfaces, client-side state, API integration, and user-facing product work.
+    - If the role is backend-focused, lead with services, APIs, databases, security, integrations, cloud workflows, and production debugging.
+    - If the role is full-stack, balance frontend and backend evidence instead of over-weighting one side.
+    - If the role is AI/LLM-focused, lead with transcription, LLM workflows, RAG, embeddings, private-data retrieval, AI endpoints, monitoring, and measurable product impact.
+    - If the role is testing, cloud/devops, data, or another technology role, choose the strongest relevant evidence from the resume and job description without forcing a backend or frontend framing.
+    - Use job keywords as supporting evidence, not as copy-pasted filler.
     - Use the first-pass hard_skills and soft_skills as active keyword guidance while rewriting.
     - Do not ignore high-value hard_skills from the first pass. Use them where they improve ATS match and role relevance.
     - Do not ignore soft_skills from the first pass, but use them only through natural phrasing in the summary and bullet wording, not as standalone skills.
@@ -779,6 +1086,7 @@ async def rewrite_resume_with_keyword_plan(
     - Create a clean header_title for the resume subtitle based on the target job title.
     - The header_title should be human-readable and professional.
     - Remove noisy job-board text such as salaries, locations, "Hiring", IDs, company/internal prefixes, or awkward separators when they do not belong in a resume title.
+    - Do not preserve awkward punctuation from job-board titles if a cleaner title is obvious.
     - Preserve meaningful stack or specialization signals when they are part of the real role title.
     - If the original target title already looks clean and professional, keep it close to the original meaning.
     - Keep the header_title concise. Prefer a nearby professional role title over a keyword-loaded rewrite.
@@ -786,9 +1094,12 @@ async def rewrite_resume_with_keyword_plan(
 
     Summary
     - Write the professional summary as one concise paragraph.
+    {summary_instructions}
     - Use plain, direct English. It should sound like Vikas explaining his background clearly, not like a polished AI profile.
     - Keep sentences short and natural. Avoid long clauses and over-formal phrasing.
     - It should sound like a strong software engineering candidate, not a generic profile.
+    - Start with the target role family and strongest matching stack. Do not start with lower-priority keywords just because they appear often in the job description.
+    - Keep broad traits like adaptable, fast learner, problem-solving, communication, teamwork, and collaboration out of the summary unless they are expressed through concrete work evidence.
     - Include role fit, core technical strengths, and business or engineering impact when evidenced by the base resume.
     - Use several of the highest-value hard_skills in the summary when that improves ATS match and readability.
     - Reflect relevant soft_skills naturally through the phrasing and emphasis of the summary when useful.
@@ -798,6 +1109,12 @@ async def rewrite_resume_with_keyword_plan(
 
     Skills
     - Present skills in meaningful grouped categories, not as one long flat list.
+    - Target the skills section to the job. Do not list every technology from the base resume.
+    {skills_instructions}
+    - Put the target role's primary stack first in the most relevant category.
+    - Prefer named technologies already supported by the resume or user-verified job keywords over generic phrases.
+    - Broad concepts such as algorithms, data structures, clean code, version control, debugging, responsive design, JavaScript frameworks, or JavaScript libraries may be included when the target job explicitly values them.
+    - When using broad concepts, connect them to concrete work or place them in a concise skills line. Do not repeat them as filler across the summary and multiple bullets.
     - The skills section must contain technical skills only: languages, frameworks, libraries, platforms, databases, APIs, security/auth technologies, testing tools, cloud/devops tools, and named engineering methodologies or patterns.
     - Do not place soft skills in the skills section. Do not add categories like "Soft Skills", "Interpersonal Skills", or similar.
     - Use soft_skills in the professional summary and in experience/project wording instead, through natural sentences rather than standalone entries.
@@ -815,9 +1132,14 @@ async def rewrite_resume_with_keyword_plan(
     Experience
     - Keep the same number and order of experience items.
     - Keep each item's job_title, company, location, start_date, and end_date unchanged.
-    - For each role, write exactly 5 strong bullet-ready lines.
+    {experience_instructions}
     - Each bullet should aim to communicate some combination of action, scope, technical stack, and result.
+    - Include 2 or more factual quantified outcomes when supported by the base resume, such as note-generation time, transcription cost, speed improvement, cost reduction, reliability, or production impact.
     - Prefer specific, meaningful bullets over generic responsibility statements.
+    - Lead with real workplace delivery that matches the role family: UI features, frontend components, APIs, backend services, integrations, databases, cloud workflows, AI workflows, testing, production fixes, and measurable outcomes.
+    - Do not waste a full bullet on routine basics like using Git, attending code reviews, being a fast learner, or following clean-code practices unless the job specifically centers on that.
+    - Do not write textbook/interview-style bullets about broad concepts. If the job asks for algorithms, data structures, debugging, version control, responsive design, or similar terms, include them naturally and connect them to real work.
+    - Avoid repeating the same generic keyword across many bullets. One natural mention is enough for most broad concepts.
     - Use metrics only when evidenced by the base resume.
     - De-emphasize weaker or less relevant details if stronger material exists.
     - Use hard_skills from the first pass when they fit naturally with the role and improve ATS match.
@@ -825,29 +1147,26 @@ async def rewrite_resume_with_keyword_plan(
     - Do not invent fake experience claims. If a first-pass skill is user-verified but not clearly tied to a specific job bullet in the base resume, prefer to surface it in the summary or skills section instead of attaching it to a fabricated work claim.
 
     Projects
-    - Keep the same number and order of project items.
-    - Keep each project's name and link unchanged.
-    - For each project, write 4 to 5 strong bullet-ready lines.
-    - Highlight the most relevant engineering work, architecture, implementation, integrations, and outcomes evidenced by the base resume.
-    - You may refine each project's technologies list by removing weaker or less relevant items already present in the base resume.
-    - Use hard_skills from the first pass when they fit naturally with the project and improve ATS match.
-    - Use soft_skills from the first pass through natural phrasing in the project bullets rather than explicit soft-skill labels.
-    - Do not invent fake project claims. If a first-pass skill is user-verified but not clearly tied to a specific project in the base resume, prefer to use it in the summary or skills section instead of fabricating project details.
+    {projects_instructions}
 
     Keyword behavior
-    - Distribute hard_skills across summary, skills, experience, and projects where they fit naturally.
-    - Use soft_skills only in the summary, experience, and projects. Never place soft_skills in the skills section.
+    {keyword_distribution_instruction}
+    - Use soft_skills only in the summary and bullet wording. Never place soft_skills in the skills section.
     - Prefer natural repetition over obvious repetition.
     - Use job-description wording selectively when useful.
     - It is acceptable to add first-pass hard_skills to the summary or skills section to improve ATS coverage, even when they are not strongly emphasized in the current base wording, because those skills are user-verified.
     - Do not add a concrete technology, implementation detail, metric, or environment claim to experience or project bullets unless it is evidenced by the base resume.
     - Avoid keyword stuffing, awkward phrasing, and buzzword clustering.
+    - If a keyword is generic, prefer to satisfy it through a concrete work bullet instead of listing the phrase directly.
 
     Tone and language
+    - Use India-focused software engineering resume style: direct, technical, readable, and believable.
     - Use simple, everyday professional English across the summary, experience bullets, and project bullets.
     - Prefer common words over formal words: "used" over "leveraged", "built" over "architected" unless architecture work is clearly factual, "improved" over "optimized" when the exact improvement is not technical optimization.
+    - Prefer verbs like "built", "used", "worked on", "improved", "integrated", "fixed", and "supported".
     - Do not make the resume sound like marketing copy.
     - Avoid exaggerated adjectives and over-polished AI language.
+    - Avoid fancy corporate wording and dramatic enthusiasm.
     - Keep the profile section especially direct and readable.
 
     Output scope
@@ -855,23 +1174,25 @@ async def rewrite_resume_with_keyword_plan(
     """
 
     system_prompt = """
-    You are a senior software-engineering resume writer and a precise JSON generator.
+    You are a senior technology resume writer and a precise JSON generator.
 
-    Your task is to rewrite a base resume for a target software engineering job using a job-keyword plan.
+    Your task is to rewrite a base resume for a target technology job using a job-keyword plan.
 
     Rules:
     - Return exactly one valid JSON object matching the required schema.
     - Do not output markdown, commentary, or extra text.
     - Base resume facts are the source of truth for concrete jobs, projects, dates, companies, and measurable claims.
     - The keyword plan contains user-verified hard_skills and soft_skills that are allowed to be used in the rewrite, even if the current base resume wording does not mention every one of them explicitly.
+    - Treat the selected job as user-verified for fit. Do not judge whether the candidate can do the job.
     - Soft skills must never appear as standalone entries inside the skills section; they should appear only through natural wording in the summary or bullets.
     - The skills section should contain concise named technologies, tools, platforms, databases, APIs, security items, testing tools, and named engineering practices only.
     - The header_title must be a cleaned, professional version of the target job title suitable for a resume subtitle.
     - Prefer a short, natural role title for header_title. Keep it close to the actual role name instead of inventing a keyword-heavy title.
     - Never invent fake experience or project claims that are not evidenced by the base resume.
     - Optimize for both ATS match and human credibility.
-    - Write like an experienced real resume writer: concise, specific, relevant, and natural.
-    - Use plain English that sounds like a real person, not AI-generated marketing copy.
+    - Write like an experienced real resume writer for India-focused technology applications: concise, specific, relevant, and natural.
+    - Do not favor backend, frontend, Java, Go, Python, AI/LLM, cloud, testing, or any other role family by default. Let the job description decide the emphasis.
+    - Use simple plain English that sounds like a real person, not AI-generated marketing copy.
     - Avoid over-formal words, exaggerated adjectives, and phrases like "dynamic", "results-oriented", "proven track record", "leveraging", "spearheaded", "robust", and "cutting-edge".
     - Avoid robotic wording, buzzword stacking, and generic filler.
     - Reason privately and output only the final JSON.
@@ -888,6 +1209,7 @@ async def rewrite_resume_with_keyword_plan(
 async def personalize_resume_with_two_step_ai(
     base_resume_details: Resume,
     job_details: Dict[str, Any],
+    resume_mode: str = RESUME_MODE_ONE_PAGE,
 ) -> tuple[Resume, str]:
     """
     Two-step AI-only resume generation flow:
@@ -895,6 +1217,7 @@ async def personalize_resume_with_two_step_ai(
     2. Rewrite the resume using that plan.
     """
     job_id = job_details.get("job_id")
+    selected_resume_mode = _normalize_resume_mode(resume_mode)
     logging.info(f"Generating keyword plan for job_id: {job_id}")
     keyword_plan = await generate_keyword_plan_with_llm(
         job_details=job_details,
@@ -904,6 +1227,7 @@ async def personalize_resume_with_two_step_ai(
         full_resume=base_resume_details,
         job_details=job_details,
         keyword_plan=keyword_plan,
+        resume_mode=selected_resume_mode,
     )
 
     personalized_resume_data = _apply_two_step_rewrite_to_resume(
@@ -914,8 +1238,34 @@ async def personalize_resume_with_two_step_ai(
         base_resume=base_resume_details,
         personalized_resume=personalized_resume_data,
     )
+    personalized_resume_data = _apply_resume_mode_constraints(
+        personalized_resume_data,
+        selected_resume_mode,
+    )
+    if (
+        selected_resume_mode == RESUME_MODE_PROJECTS
+        and base_resume_details.projects
+        and not personalized_resume_data.projects
+    ):
+        logging.info(
+            "Project Mode returned no projects for job_id %s. Falling back to the strongest base project.",
+            job_id,
+        )
+        personalized_resume_data.projects = _fallback_projects_for_project_mode(
+            base_resume_details,
+            keyword_plan,
+            max_projects=1,
+        )
+        personalized_resume_data = _apply_resume_mode_constraints(
+            personalized_resume_data,
+            selected_resume_mode,
+        )
 
-    for section_name in ("experience", "projects"):
+    sections_to_validate = ["experience"]
+    if selected_resume_mode == RESUME_MODE_PROJECTS:
+        sections_to_validate.append("projects")
+
+    for section_name in sections_to_validate:
         original_content = getattr(base_resume_details, section_name)
         customized_content = getattr(personalized_resume_data, section_name)
         is_valid, reason = validate_customization(
@@ -1036,7 +1386,7 @@ async def personalize_section_with_llm(
         - You do not have to mirror the original wording, but do not over-polish it.
         - Avoid phrases like "dynamic", "results-oriented", "passionate", "seasoned", "proven track record", "leveraging", "spearheaded", "robust", "cutting-edge", "synergy", and similar AI-sounding resume language.
         - **ABSOLUTELY DO NOT INVENT new information, skills, projects, job titles, or responsibilities not explicitly found in the original resume materials.** Rephrasing and emphasizing existing facts is allowed; fabrication is not.
-        - For example, if the original summary says "IT Support Specialist who developed a tool using React," do NOT change this to "Experienced Frontend Engineer." Instead, you might say "IT Support Specialist with experience developing user-facing tools using React, such as Click4IT..."
+        - For example, if the original summary describes support work with one relevant engineering project, do not turn the candidate into a different primary role. Instead, explain the real role and the relevant project clearly.
         ---
         **Expected JSON Output Structure:** {{"summary": "Software Engineer with X years of experience building backend and full-stack applications..."}}
         """
@@ -1080,7 +1430,7 @@ async def personalize_section_with_llm(
             - Return the description as 4 or 5 concise bullet-ready lines separated by newline characters.
             - Prefer the most impressive and most job-relevant outcomes instead of trying to preserve every lower-value detail.
             - You may combine or reshape original points into stronger bullets as long as the result stays truthful to the resume evidence.
-            - Example: Instead of "Project using React," try "Developed a responsive UI for [Project Purpose] using React and Redux, improving user engagement."
+            - Example: Instead of "Project using [Technology]," explain what was built, which relevant tools were used, and what practical outcome it supported.
             - Do NOT invent skills or experiences.
             ---
             **Expected JSON Output Structure (for this single project item):** {{"project": {{"name": "Original Project Name", "technologies": ["Tech1", "Tech2"], "description": "Enhanced description...", "link": "Original Link (if present)"}}}}
@@ -1100,7 +1450,7 @@ async def personalize_section_with_llm(
         - Review the 'Full Resume Context' (which includes the candidate's summary, all experience descriptions, and all project descriptions/technologies).
         - Also, review the 'Original Content of This Section (Candidate's Initial Skills List)' provided above.
         - Compile a temporary list of all skills that are *explicitly written and mentioned* in these specific parts of the resume materials.
-        - **CRITICAL RULE: DO NOT infer, assume, or invent any skills. If a skill is not literally written down in the provided resume materials (summary, experience, projects, original skills list), you MUST NOT include it in your temporary list.** For example, if the resume states "developed responsive web applications," do not assume "JavaScript" or "React" unless "JavaScript" or "React" are explicitly written elsewhere as skills or technologies used.
+        - **CRITICAL RULE: DO NOT infer, assume, or invent any skills. If a skill is not literally written down in the provided resume materials (summary, experience, projects, original skills list), you MUST NOT include it in your temporary list.** For example, if the resume states a broad outcome, do not assume specific tools unless those tools are explicitly written elsewhere as skills or technologies used.
 
         **2. Select and Refine for the Target Job and Conciseness:**
         - From your temporary list of the candidate's *actual, explicitly mentioned* skills, select only those that are most relevant to the 'Target Job Description'.
@@ -1114,7 +1464,7 @@ async def personalize_section_with_llm(
         - This skills list should still be readable, but do not throw away meaningful skills just to force a short list.
 
         ---
-        **Expected JSON Output Structure:** {{"skills": ["Python", "JavaScript", "React", "Node.js", "AWS (EC2, S3, Lambda)", "Docker", "Kubernetes", "Agile Methodologies", "CI/CD Pipelines", "SQL", "Git"]}}
+        **Expected JSON Output Structure:** {{"skills": ["Category: Skill 1, Skill 2, Skill 3", "Category: Skill 4, Skill 5"]}}
         """
         prompt = prompt_intro + specific_instructions 
         prompts.append(prompt)
@@ -1201,12 +1551,27 @@ def validate_customization(
     elif section_name == "projects":
         if not isinstance(original_content, list) or not isinstance(customized_content, list):
             return False, "Projects content is not a list."
-        if len(original_content) != len(customized_content):
+        if len(original_content) != len(customized_content) and not allow_project_technology_changes:
             return False, f"Projects count changed from {len(original_content)} to {len(customized_content)}."
+        if allow_project_technology_changes and len(customized_content) > len(original_content):
+            return False, f"Projects count increased from {len(original_content)} to {len(customized_content)}."
 
-        for orig, cust in zip(original_content, customized_content):
-            o_dict = orig.model_dump() if hasattr(orig, 'model_dump') else orig
+        original_by_name = {
+            str((orig.model_dump() if hasattr(orig, 'model_dump') else orig).get('name', '')).strip().lower(): orig
+            for orig in original_content
+        }
+
+        for index, cust in enumerate(customized_content):
             c_dict = cust.model_dump() if hasattr(cust, 'model_dump') else cust
+            c_name = str(c_dict.get('name', '')).strip().lower()
+            if allow_project_technology_changes:
+                orig = original_by_name.get(c_name)
+                if orig is None:
+                    return False, f"Project '{c_dict.get('name', '')}' was not present in the original resume."
+                o_dict = orig.model_dump() if hasattr(orig, 'model_dump') else orig
+            else:
+                orig = original_content[index]
+                o_dict = orig.model_dump() if hasattr(orig, 'model_dump') else orig
 
             for field in ['name', 'link']:
                 o_val = str(o_dict.get(field, '')).strip()
@@ -1233,6 +1598,7 @@ async def process_job(
     base_resume_details: Resume,
     generation_flow: str = "legacy",
     email_override: str | None = None,
+    resume_mode: str = RESUME_MODE_ONE_PAGE,
 ):
     """
     Processes a single job: personalizes resume, generates PDF, uploads, updates status.
@@ -1243,6 +1609,12 @@ async def process_job(
         return
 
     logging.info(f"--- Starting processing for job_id: {job_id} ---")
+    selected_resume_mode = _normalize_resume_mode(resume_mode)
+    logging.info(
+        "Selected resume mode for job_id %s: %s",
+        job_id,
+        _resume_mode_label(selected_resume_mode),
+    )
 
     try:
         # 1. Personalize Resume Sections
@@ -1254,6 +1626,7 @@ async def process_job(
             personalized_resume_data, header_title = await personalize_resume_with_two_step_ai(
                 base_resume_details=base_resume_details,
                 job_details=job_details,
+                resume_mode=selected_resume_mode,
             )
         else:
             logging.info(
@@ -1304,6 +1677,10 @@ async def process_job(
             base_resume=base_resume_details,
             personalized_resume=personalized_resume_data,
         )
+        personalized_resume_data = _apply_resume_mode_constraints(
+            personalized_resume_data,
+            selected_resume_mode,
+        )
         personalized_resume_data = _apply_job_contact_overrides(
             personalized_resume_data,
             job_details,
@@ -1321,9 +1698,10 @@ async def process_job(
                     raw_header_title,
                     header_title,
                 )
-            pdf_bytes = pdf_generator.create_resume_pdf(
+            personalized_resume_data, pdf_bytes = create_resume_pdf_for_mode(
                 personalized_resume_data,
                 header_title=header_title,
+                resume_mode=selected_resume_mode,
             )
             if not pdf_bytes:
                 raise ValueError("PDF generation returned empty bytes.")
@@ -1388,6 +1766,7 @@ async def run_job_processing_cycle(
     force_regenerate: bool = False,
     generation_flow: str | None = None,
     email_override: str | None = None,
+    resume_mode: str = RESUME_MODE_ONE_PAGE,
 ):
     """
     Fetches top jobs and processes them one by one.
@@ -1404,6 +1783,8 @@ async def run_job_processing_cycle(
             "Use 'legacy' or 'two_step_ai'."
         )
     logging.info(f"Selected resume generation flow: {selected_generation_flow}")
+    selected_resume_mode = _normalize_resume_mode(resume_mode)
+    logging.info("Selected resume mode: %s", _resume_mode_label(selected_resume_mode))
 
     # 1. Retrieve Base Resume Details from local source of truth (with Supabase fallback)
     base_resume_details = _load_base_resume_details()
@@ -1442,7 +1823,13 @@ async def run_job_processing_cycle(
                 "A new customized resume will be created and linked to this job."
             )
 
-        await process_job(job_record, base_resume_details, selected_generation_flow, email_override=email_override)
+        await process_job(
+            job_record,
+            base_resume_details,
+            selected_generation_flow,
+            email_override=email_override,
+            resume_mode=selected_resume_mode,
+        )
         logging.info("Finished job processing cycle.")
         return
 
@@ -1522,7 +1909,13 @@ async def run_job_processing_cycle(
 
     # 3. Process each job sequentially to avoid overwhelming LLM/resources
     for job_details in jobs_to_process:
-        await process_job(job_details, base_resume_details, selected_generation_flow, email_override=email_override)
+        await process_job(
+            job_details,
+            base_resume_details,
+            selected_generation_flow,
+            email_override=email_override,
+            resume_mode=selected_resume_mode,
+        )
 
     logging.info("Finished job processing cycle.")
 
@@ -1551,6 +1944,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--email-override",
         help="Optional email override for this generation run. If omitted, the default resume email is used.",
     )
+    parser.add_argument(
+        "--resume-mode",
+        choices=[RESUME_MODE_ONE_PAGE, RESUME_MODE_PROJECTS],
+        default=RESUME_MODE_ONE_PAGE,
+        help="Choose resume output mode. Defaults to one_page; use project_mode to include Projects.",
+    )
     return parser
 
 
@@ -1568,6 +1967,7 @@ if __name__ == "__main__":
                 force_regenerate=args.force_regenerate,
                 generation_flow=args.flow,
                 email_override=args.email_override,
+                resume_mode=args.resume_mode,
             )
         )
         logging.info("Rresume processing completed successfully.")

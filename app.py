@@ -49,6 +49,17 @@ _RESUME_PROVIDER_ALIASES = {
     "google": "gemini",
     "sarvam": "sarvam",
 }
+_RESUME_MODE_ALIASES = {
+    "default": "one_page",
+    "onepage": "one_page",
+    "one_page": "one_page",
+    "no_projects": "one_page",
+    "compact": "one_page",
+    "projects": "project_mode",
+    "project": "project_mode",
+    "project_mode": "project_mode",
+    "include_projects": "project_mode",
+}
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
@@ -147,6 +158,11 @@ def _normalize_resume_provider(provider: str | None) -> str:
     return _RESUME_PROVIDER_ALIASES.get(cleaned, "gemini")
 
 
+def _normalize_resume_mode(mode: str | None) -> str:
+    cleaned = str(mode or "").strip().lower().replace("-", "_")
+    return _RESUME_MODE_ALIASES.get(cleaned, "one_page")
+
+
 def _resume_generation_env_overrides(provider: str | None) -> dict[str, str]:
     normalized_provider = _normalize_resume_provider(provider)
     if normalized_provider == "sarvam":
@@ -243,12 +259,15 @@ def _build_command(
     email_override: str | None = None,
     job_url: str | None = None,
     resume_provider: str | None = None,
+    resume_mode: str | None = None,
 ) -> tuple[str, list[str], dict[str, str | None]]:
     python = sys.executable
     cleaned_email_override = str(email_override or "").strip()
     env_overrides: dict[str, str | None] = {}
     selected_provider = _normalize_resume_provider(resume_provider)
     provider_suffix = " [Sarvam]" if selected_provider == "sarvam" else " [Gemini]"
+    selected_resume_mode = _normalize_resume_mode(resume_mode)
+    mode_suffix = " [Projects]" if selected_resume_mode == "project_mode" else " [One Page]"
 
     def _append_email_override(command: list[str]) -> list[str]:
         if cleaned_email_override:
@@ -260,6 +279,10 @@ def _build_command(
         env_overrides.update(provider_overrides)
         return command
 
+    def _with_resume_mode(command: list[str]) -> list[str]:
+        command.extend(["--resume-mode", selected_resume_mode])
+        return command
+
     if action == "scrape":
         return "Scrape Jobs", [python, "scraper.py"], {}
     if action == "score":
@@ -269,19 +292,23 @@ def _build_command(
         if not cleaned_job_url:
             raise ValueError("Job URL is required.")
         command = _with_resume_provider(
-            _append_email_override([python, "job_link_processor.py", "--job-url", cleaned_job_url])
+            _with_resume_mode(
+                _append_email_override([python, "job_link_processor.py", "--job-url", cleaned_job_url])
+            )
         )
         return (
-            f"Import Job Link and Generate Resume{provider_suffix}",
+            f"Import Job Link and Generate Resume{provider_suffix}{mode_suffix}",
             command,
             env_overrides,
         )
     if action == "generate_next":
         command = _with_resume_provider(
-            _append_email_override([python, "custom_resume_generator.py", "--flow", "two_step_ai", "--limit", "1"])
+            _with_resume_mode(
+                _append_email_override([python, "custom_resume_generator.py", "--flow", "two_step_ai", "--limit", "1"])
+            )
         )
         return (
-            f"Generate Next Resume{provider_suffix}",
+            f"Generate Next Resume{provider_suffix}{mode_suffix}",
             command,
             env_overrides,
         )
@@ -289,10 +316,12 @@ def _build_command(
         if count is None or count <= 0:
             raise ValueError("Resume count must be a positive number.")
         command = _with_resume_provider(
-            _append_email_override([python, "custom_resume_generator.py", "--flow", "two_step_ai", "--limit", str(count)])
+            _with_resume_mode(
+                _append_email_override([python, "custom_resume_generator.py", "--flow", "two_step_ai", "--limit", str(count)])
+            )
         )
         return (
-            f"Generate {count} Selected Resume{'s' if count != 1 else ''}{provider_suffix}",
+            f"Generate {count} Selected Resume{'s' if count != 1 else ''}{provider_suffix}{mode_suffix}",
             command,
             env_overrides,
         )
@@ -307,14 +336,16 @@ def _build_command(
 
         existing_resume_id = str(job_record.get("customized_resume_id") or "").strip()
         command = _with_resume_provider(
-            _append_email_override([python, "custom_resume_generator.py", "--job-id", job_id, "--flow", "two_step_ai"])
+            _with_resume_mode(
+                _append_email_override([python, "custom_resume_generator.py", "--job-id", job_id, "--flow", "two_step_ai"])
+            )
         )
         label = f"Generate Resume for {job_id}"
         if existing_resume_id:
             command.append("--force-regenerate")
             label = f"Regenerate Resume for {job_id}"
         return (
-            f"{label}{provider_suffix}",
+            f"{label}{provider_suffix}{mode_suffix}",
             command,
             env_overrides,
         )
@@ -1058,6 +1089,7 @@ def run_action():
     job_url = (request.form.get("job_url") or "").strip()
     email_override = (request.form.get("email_override") or "").strip()
     resume_provider = (request.form.get("resume_provider") or "").strip()
+    resume_mode = (request.form.get("resume_mode") or "").strip()
     count_raw = (request.form.get("count") or "").strip()
     count = None
     if count_raw:
@@ -1074,6 +1106,7 @@ def run_action():
             email_override or None,
             job_url or None,
             resume_provider or None,
+            resume_mode or None,
         )
     except ValueError as exc:
         return jsonify({"ok": False, "error": str(exc)}), 400

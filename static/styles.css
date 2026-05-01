@@ -198,6 +198,10 @@ h3 {
   box-shadow: var(--shadow-sm);
 }
 
+.resume-mode-switch {
+  min-width: 240px;
+}
+
 .provider-switch-label {
   color: var(--muted);
   font-size: 0.72rem;

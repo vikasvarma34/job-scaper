@@ -1,14 +1,20 @@
 import io
 import re
+from datetime import date
 from xml.sax.saxutils import escape
 
-from reportlab.lib.enums import TA_LEFT
+from reportlab.lib.enums import TA_LEFT, TA_RIGHT
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import inch
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
 
 from pdf_generator import _register_arial_fonts
+
+
+def _format_current_date() -> str:
+    today = date.today()
+    return f"{today.strftime('%B')} {today.day}, {today.year}"
 
 
 def _clean_text(value: str | None) -> str:
@@ -78,31 +84,42 @@ def create_cover_letter_pdf(
         name="CoverLetterName",
         parent=styles["Heading1"],
         fontName=bold_font,
-        fontSize=15,
-        leading=18,
+        fontSize=18,
+        leading=21,
         alignment=TA_LEFT,
-        spaceAfter=3,
+        spaceAfter=4,
     )
     style_contact = ParagraphStyle(
         name="CoverLetterContact",
         parent=styles["Normal"],
         fontName=regular_font,
-        fontSize=10.5,
-        leading=12.5,
+        fontSize=12,
+        leading=14,
         alignment=TA_LEFT,
         spaceAfter=2,
+    )
+    style_date = ParagraphStyle(
+        name="CoverLetterDate",
+        parent=styles["Normal"],
+        fontName=regular_font,
+        fontSize=12,
+        leading=14,
+        alignment=TA_RIGHT,
+        spaceAfter=8,
     )
     style_body = ParagraphStyle(
         name="CoverLetterBody",
         parent=styles["Normal"],
         fontName=regular_font,
-        fontSize=11,
+        fontSize=12,
         leading=14,
         alignment=TA_LEFT,
         spaceAfter=10,
     )
 
     story: list = []
+
+    story.append(Paragraph(escape(_format_current_date()), style_date))
 
     if _clean_text(applicant_name):
         story.append(Paragraph(escape(_clean_text(applicant_name).upper()), style_name))

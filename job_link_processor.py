@@ -15,7 +15,6 @@ from markdownify import markdownify as md
 
 import config
 import custom_resume_generator
-import pdf_generator
 import resume_validator
 import supabase_utils
 from llm_client import primary_client
@@ -402,11 +401,14 @@ async def _generate_resume_for_manual_job(
     base_resume: Resume,
     keyword_plan: ATSKeywordPlan,
     email_override: str | None = None,
+    resume_mode: str = custom_resume_generator.RESUME_MODE_ONE_PAGE,
 ) -> int:
+    selected_resume_mode = custom_resume_generator._normalize_resume_mode(resume_mode)  # noqa: SLF001
     rewritten_resume = await custom_resume_generator.rewrite_resume_with_keyword_plan(
         full_resume=base_resume,
         job_details=job_details,
         keyword_plan=keyword_plan,
+        resume_mode=selected_resume_mode,
     )
 
     personalized_resume = custom_resume_generator._apply_two_step_rewrite_to_resume(  # noqa: SLF001
@@ -417,8 +419,34 @@ async def _generate_resume_for_manual_job(
         base_resume=base_resume,
         personalized_resume=personalized_resume,
     )
+    personalized_resume = custom_resume_generator._apply_resume_mode_constraints(  # noqa: SLF001
+        personalized_resume,
+        selected_resume_mode,
+    )
+    if (
+        selected_resume_mode == custom_resume_generator.RESUME_MODE_PROJECTS
+        and base_resume.projects
+        and not personalized_resume.projects
+    ):
+        logging.info(
+            "Project Mode returned no projects for manual job %s. Falling back to the strongest base project.",
+            job_details.get("job_id"),
+        )
+        personalized_resume.projects = custom_resume_generator._fallback_projects_for_project_mode(  # noqa: SLF001
+            base_resume,
+            keyword_plan,
+            max_projects=1,
+        )
+        personalized_resume = custom_resume_generator._apply_resume_mode_constraints(  # noqa: SLF001
+            personalized_resume,
+            selected_resume_mode,
+        )
 
-    for section_name in ("experience", "projects"):
+    sections_to_validate = ["experience"]
+    if selected_resume_mode == custom_resume_generator.RESUME_MODE_PROJECTS:
+        sections_to_validate.append("projects")
+
+    for section_name in sections_to_validate:
         is_valid, reason = custom_resume_generator.validate_customization(
             section_name,
             getattr(base_resume, section_name),
@@ -439,9 +467,10 @@ async def _generate_resume_for_manual_job(
         email_override=email_override,
     )
 
-    pdf_bytes = pdf_generator.create_resume_pdf(
+    personalized_resume, pdf_bytes = custom_resume_generator.create_resume_pdf_for_mode(
         personalized_resume,
         header_title=header_title,
+        resume_mode=selected_resume_mode,
     )
     pdf_is_valid, pdf_issues = resume_validator.validate_generated_resume_pdf(
         pdf_bytes=pdf_bytes,
@@ -483,7 +512,11 @@ async def _generate_resume_for_manual_job(
     return 0
 
 
-async def process_job_link(job_url: str, email_override: str | None = None) -> int:
+async def process_job_link(
+    job_url: str,
+    email_override: str | None = None,
+    resume_mode: str = custom_resume_generator.RESUME_MODE_ONE_PAGE,
+) -> int:
     normalized_url = _normalize_url(job_url)
     if not normalized_url:
         logging.error("A valid job URL is required.")
@@ -535,6 +568,7 @@ async def process_job_link(job_url: str, email_override: str | None = None) -> i
         base_resume=base_resume,
         keyword_plan=keyword_plan,
         email_override=email_override,
+        resume_mode=resume_mode,
     )
 
 
@@ -545,8 +579,23 @@ def main() -> int:
         "--email-override",
         help="Optional email override for this manual generation run.",
     )
+    parser.add_argument(
+        "--resume-mode",
+        choices=[
+            custom_resume_generator.RESUME_MODE_ONE_PAGE,
+            custom_resume_generator.RESUME_MODE_PROJECTS,
+        ],
+        default=custom_resume_generator.RESUME_MODE_ONE_PAGE,
+        help="Choose resume output mode. Defaults to one_page; use project_mode to include Projects.",
+    )
     args = parser.parse_args()
-    return asyncio.run(process_job_link(args.job_url, email_override=args.email_override))
+    return asyncio.run(
+        process_job_link(
+            args.job_url,
+            email_override=args.email_override,
+            resume_mode=args.resume_mode,
+        )
+    )
 
 
 if __name__ == "__main__":

@@ -3,13 +3,13 @@ import logging
 import re
 from xml.sax.saxutils import escape
 
-from reportlab.lib.enums import TA_LEFT
+from reportlab.lib.enums import TA_LEFT, TA_RIGHT
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import inch
-from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
+from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 from models import Resume
 
@@ -115,6 +115,49 @@ def _append_section_heading(
     target_story.append(Paragraph(escape(title), style_heading))
 
 
+def _append_left_right_line(
+    target_story: list,
+    left_text: str,
+    right_text: str,
+    left_style: ParagraphStyle,
+    right_style: ParagraphStyle,
+    width: float,
+) -> None:
+    clean_left = _safe_text(left_text)
+    clean_right = _safe_text(right_text)
+    if not clean_left and not clean_right:
+        return
+    if not clean_right:
+        target_story.append(Paragraph(escape(clean_left), left_style))
+        return
+    if not clean_left:
+        target_story.append(Paragraph(escape(clean_right), right_style))
+        return
+
+    table = Table(
+        [
+            [
+                Paragraph(escape(clean_left), left_style),
+                Paragraph(escape(clean_right), right_style),
+            ]
+        ],
+        colWidths=[width * 0.68, width * 0.32],
+        hAlign="LEFT",
+    )
+    table.setStyle(
+        TableStyle(
+            [
+                ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+                ("TOPPADDING", (0, 0), (-1, -1), 0),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ]
+        )
+    )
+    target_story.append(table)
+
+
 def _append_skill_lines(
     target_story: list,
     skills: list[str],
@@ -144,8 +187,8 @@ def create_resume_pdf(resume_data: Resume, header_title: str | None = None) -> b
         pagesize=letter,
         leftMargin=0.55 * inch,
         rightMargin=0.55 * inch,
-        topMargin=0.55 * inch,
-        bottomMargin=0.55 * inch,
+        topMargin=0.45 * inch,
+        bottomMargin=0.45 * inch,
     )
 
     styles = getSampleStyleSheet()
@@ -164,8 +207,8 @@ def create_resume_pdf(resume_data: Resume, header_title: str | None = None) -> b
         name="HeaderTitle",
         parent=styles["Normal"],
         fontName=bold_font,
-        fontSize=12,
-        leading=14,
+        fontSize=13,
+        leading=15,
         alignment=TA_LEFT,
         spaceAfter=4,
     )
@@ -173,8 +216,8 @@ def create_resume_pdf(resume_data: Resume, header_title: str | None = None) -> b
         name="Contact",
         parent=styles["Normal"],
         fontName=regular_font,
-        fontSize=10,
-        leading=12,
+        fontSize=12,
+        leading=14,
         alignment=TA_LEFT,
         spaceAfter=2,
     )
@@ -192,8 +235,8 @@ def create_resume_pdf(resume_data: Resume, header_title: str | None = None) -> b
         name="Body",
         parent=styles["Normal"],
         fontName=regular_font,
-        fontSize=11,
-        leading=13,
+        fontSize=12,
+        leading=14,
         alignment=TA_LEFT,
         spaceAfter=2,
     )
@@ -208,6 +251,11 @@ def create_resume_pdf(resume_data: Resume, header_title: str | None = None) -> b
         parent=style_body,
         spaceAfter=1,
     )
+    style_meta_right = ParagraphStyle(
+        name="MetaRight",
+        parent=style_meta,
+        alignment=TA_RIGHT,
+    )
     style_bullet = ParagraphStyle(
         name="Bullet",
         parent=style_body,
@@ -217,6 +265,7 @@ def create_resume_pdf(resume_data: Resume, header_title: str | None = None) -> b
     )
 
     story: list = []
+    content_width = doc.width
 
     if _safe_text(resume_data.name):
         story.append(Paragraph(escape(_safe_text(resume_data.name).upper()), style_name))
@@ -258,17 +307,14 @@ def create_resume_pdf(resume_data: Resume, header_title: str | None = None) -> b
     if resume_data.experience:
         _append_section_heading(story, "PROFESSIONAL EXPERIENCE", style_section_heading)
         for exp in resume_data.experience:
-            role_parts = [
-                _safe_text(exp.job_title),
+            if _safe_text(exp.job_title):
+                story.append(Paragraph(escape(_safe_text(exp.job_title)), style_role))
+
+            company_location_parts = [
                 _safe_text(exp.company),
+                _safe_text(exp.location),
             ]
-            role_parts = [part for part in role_parts if part]
-            if role_parts:
-                story.append(Paragraph(escape(" | ".join(role_parts)), style_role))
-
-            if _safe_text(exp.location):
-                story.append(Paragraph(escape(_safe_text(exp.location)), style_meta))
-
+            company_location = " | ".join(part for part in company_location_parts if part)
             dates = ""
             if _safe_text(exp.start_date) and _safe_text(exp.end_date):
                 dates = f"{_safe_text(exp.start_date)} - {_safe_text(exp.end_date)}"
@@ -276,8 +322,14 @@ def create_resume_pdf(resume_data: Resume, header_title: str | None = None) -> b
                 dates = f"{_safe_text(exp.start_date)} - Present"
             elif _safe_text(exp.end_date):
                 dates = _safe_text(exp.end_date)
-            if dates:
-                story.append(Paragraph(escape(dates), style_meta))
+            _append_left_right_line(
+                story,
+                company_location,
+                dates,
+                style_meta,
+                style_meta_right,
+                content_width,
+            )
 
             _append_bullet_lines(story, exp.description, style_bullet)
             story.append(Spacer(1, 0.04 * inch))
@@ -315,9 +367,6 @@ def create_resume_pdf(resume_data: Resume, header_title: str | None = None) -> b
             if degree_line:
                 story.append(Paragraph(escape(degree_line), style_role))
 
-            if _safe_text(edu.institution):
-                story.append(Paragraph(escape(_safe_text(edu.institution)), style_meta))
-
             years = ""
             if _safe_text(edu.start_year) and _safe_text(edu.end_year):
                 years = f"{_safe_text(edu.start_year)} - {_safe_text(edu.end_year)}"
@@ -325,8 +374,14 @@ def create_resume_pdf(resume_data: Resume, header_title: str | None = None) -> b
                 years = _safe_text(edu.end_year)
             elif _safe_text(edu.start_year):
                 years = _safe_text(edu.start_year)
-            if years:
-                story.append(Paragraph(escape(years), style_meta))
+            _append_left_right_line(
+                story,
+                _safe_text(edu.institution),
+                years,
+                style_meta,
+                style_meta_right,
+                content_width,
+            )
             story.append(Spacer(1, 0.04 * inch))
 
     if resume_data.certifications:

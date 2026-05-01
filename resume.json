@@ -2,49 +2,49 @@
     "name": "Vikas Varma Pokala",
     "email": "vikaspokala96@gmail.com",
     "phone": "+1-437-460-4737",
-    "location": "Hyderabad, Telangana, IN",
-    "summary": "Software Engineer with 2+ years of experience building production-grade backend and full-stack applications across startup and enterprise environments.\nHands-on experience across Java, Go, Python, JavaScript/TypeScript, SQL, Spring Boot, Node.js, React, REST, GraphQL, microservices, and cloud-based application workflows.\nStrong background in backend services, API integrations, database-driven systems, secure authentication/authorization, and scalable service-oriented design.\nAlso contributed to selected AI-enabled product features, including transcription, workflow automation, retrieval-based assistant capabilities, and private-data integrations.\nMaintained a broader engineering focus across full-stack systems while delivering reliable product and platform improvements.",
+    "location": "Toronto, Canada | Open to relocate to India",
+    "summary": "Software Engineer with 2+ years of experience building backend and full-stack applications using Java, Go, Python, JavaScript/TypeScript, Spring Boot, Node.js, React, REST APIs, GraphQL, SQL, and AWS.\nWorked on production healthcare and enterprise systems, including secure APIs, AI-assisted documentation, transcription workflows, private-data retrieval, and middleware integrations.",
     "skills": [
         "Languages: Java, Go, Python, JavaScript, TypeScript, SQL",
-        "Frontend: React.js, Redux, React Router, React Query / RTK, HTML5, CSS3 / LESS, Bootstrap, Axios, AJAX",
-        "Backend: Spring Boot, Spring Cloud, Hibernate / JPA, Java EE, Node.js, Express.js, JAX-RS, REST APIs, GraphQL, Socket.IO, Microservices",
+        "Frontend: React.js, Redux, React Router, React Query / RTK, HTML5, CSS3 / LESS, Bootstrap, Axios",
+        "Backend: Spring Boot, Spring Cloud, Hibernate / JPA, Node.js, Express.js, JAX-RS, REST APIs, GraphQL, Microservices",
         "Databases: MySQL, Oracle, MongoDB, Firebase Firestore",
         "Cloud / DevOps: AWS, S3, Lambda, KMS, Transcribe, CloudWatch, Docker, Jenkins, Git, Maven, Gradle, CI/CD",
         "Security: Spring Security, JWT, OAuth 2.0, OpenID Connect, RBAC, scoped access control, API key lifecycle management",
         "Testing / Tools: JUnit, Jest, Mocha, Chai, Cucumber, Selenium, Postman, GraphQL Playground",
         "AI / LLM Integrations: OpenAI, Gemini, Whisper, Pinecone, RAG workflows, private-data retrieval",
-        "Architecture / Practices: Microservices, Service-Oriented Architecture (SOA), clean architecture, SOLID principles, event-driven systems, webhook integrations, Agile / Scrum, code reviews, debugging"
+        "Architecture / Practices: Microservices, Service-Oriented Architecture (SOA), clean architecture, SOLID principles, event-driven systems, webhook integrations, Agile / Scrum"
     ],
     "education": [
         {
-            "degree": "Bachelor of Technology",
-            "field_of_study": "Mechanical Engineering",
-            "institution": "National Institute of Technology Warangal",
-            "start_year": "Aug 2016",
-            "end_year": "Aug 2020"
-        },
-        {
             "degree": "Postgraduate Diploma",
             "field_of_study": "Quality Engineering Management",
-            "institution": "Lambton College",
+            "institution": "Lambton College, Sarnia",
             "start_year": "Sep 2021",
             "end_year": "May 2023"
+        },
+        {
+            "degree": "Bachelor of Technology",
+            "field_of_study": "Mechanical Engineering",
+            "institution": "National Institute of Technology, Warangal",
+            "start_year": "Aug 2016",
+            "end_year": "Aug 2020"
         }
     ],
     "experience": [
         {
             "job_title": "Full Stack Developer",
             "company": "Markitech AI",
-            "location": "Toronto, ON, CANADA",
+            "location": "Toronto, ON, Canada",
             "start_date": "Feb 2024",
             "end_date": "Feb 2026",
-            "description": "Built production-grade backend and full-stack features across Java/Spring Boot services, React applications, and integration layers for healthtech and enterprise products.\nDeveloped APIs, business logic, and service workflows using Java, Go, Node.js, Python, and SQL to support product features, internal tools, and third-party integrations.\nDesigned and maintained REST and GraphQL endpoints for frontend applications, middleware-driven request flows, and secure service-to-service communication.\nWorked across distributed microservices with a strong focus on service boundaries, integration design, maintainability, and scalable backend architecture.\nApplied Spring Boot, Spring Cloud, Hibernate/JPA, and SQL-based access patterns to support transactional workflows and backend service development.\nBuilt and enhanced React-based user interfaces for operational and healthcare workflows using reusable components and structured client-side state patterns.\nIntegrated third-party APIs and webhook-based services with controlled request handling, resilient event processing, and secure data exchange patterns.\nWorked with MySQL, Oracle, MongoDB, and Firebase Firestore to support transactional systems, real-time application state, and backend data workflows.\nImplemented authentication and authorization flows using JWT, OAuth 2.0, OpenID Connect, RBAC, and scoped access controls across frontend and backend systems.\nUsed AWS services including S3, Lambda, KMS, Transcribe, and CloudWatch, along with Docker and CI/CD workflows, to support backend processing, monitoring, and secure storage.\nContributed to unit testing, integration testing, debugging, and code reviews in Agile/Scrum teams to improve reliability and release quality.\nLed end-to-end design and implementation of the AI-assisted clinical note generation workflow for CliniScripts using Spring Boot backends and LLM workflow design, reducing average note generation time from ~60s to under 30s and improving clinician efficiency.\nArchitected and implemented the speech-to-text/transcription pipeline (provider routing, streaming logic, fallback handling) leveraging AWS Transcribe and custom streaming logic, cutting transcription cost from ~$1.00/hour to ~$0.07/hour while increasing production reliability.\nBuilt the private-data copilot (RAG) workflow end-to-end: implemented file upload, embedding storage in Pinecone, and retrieval-based context injection for grounded assistant responses, enabling secure user-specific document Q&A and higher response relevance.\nOptimized production workflows and monitoring (CloudWatch, Docker, Jenkins CI/CD) for these AI features, owning deployment tasks and validating improvements via production metrics and cost tracking."
+            "description": "Built backend and full-stack features across Java/Spring Boot services, React applications, and integration layers for healthcare and enterprise products.\nDeveloped REST and GraphQL APIs, business logic, middleware flows, and service integrations using Java, Go, Node.js, Python, SQL, and AWS.\nWorked with MySQL, Oracle, MongoDB, and Firebase Firestore to support transactional systems, real-time application state, and backend data workflows.\nImplemented authentication and authorization flows using JWT, OAuth 2.0, OpenID Connect, RBAC, AWS KMS, and scoped access controls.\nBuilt AI-assisted clinical documentation workflows for CliniScripts, reducing average note generation time from ~60s to under 30s.\nImproved speech-to-text processing with AWS Transcribe, provider routing, streaming logic, and fallback handling, reducing transcription cost from ~$1.00/hour to ~$0.07/hour.\nBuilt a private-data copilot workflow with file upload, Pinecone embeddings, and retrieval-based context injection for user-specific document Q&A.\nWorked on Go and GraphQL middleware for TELUS marketplace systems supporting IoT connectivity, SIM-related flows, ordering, and device-management operations.\nUsed Docker, Jenkins CI/CD, CloudWatch, unit testing, integration testing, debugging, and code reviews to support production reliability."
         }
     ],
     "projects": [
         {
             "name": "CliniScripts - AI-Powered Clinical Documentation Platform",
-            "description": "Contributed to a clinical documentation platform focused on secure transcription, structured note generation, and clinician-facing workflows.\nBuilt backend and AI-assisted workflow features that improved note-generation speed by 50% through workflow optimization, request handling, and LLM workflow design.\nReduced transcription costs by 70% by improving provider usage strategy, streaming logic, and fallback handling across speech-to-text workflows.\nImplemented request-control mechanisms for AI-powered endpoints to improve platform stability and controlled usage.\nDeveloped a private-data copilot capability that enabled file upload, embedding storage in Pinecone, and retrieval of relevant context for grounded responses.\nSupported retrieval-based assistant behavior using vector search, LLM workflows, and user-specific context injection in secure healthcare-oriented environments.\nImplemented secure authentication, scoped authorization, and access-control patterns for backend endpoints using AWS KMS and S3 for encrypted storage, improving safeguarded data exchange and reducing risk of unauthorized access in clinician workflows.\nBuilt and owned backend endpoints and middleware for transcription and embeddings flows, integrating AWS Transcribe for streaming speech-to-text, OpenAI for LLM workflow design, and Pinecone SDK for vector storage to support private-data retrieval and grounded assistant responses.\nOptimized request-control mechanisms (production middleware and API gateways) that contributed to measured note-generation speed improvements (~50%) and transcription-cost reductions (~70%) by shaping request patterns, fallback handling, and streaming logic.\nInstrumented production monitoring and logging with AWS CloudWatch and structured telemetry to improve reliability and observability of AI-powered endpoints, enabling faster incident response and stable clinician-facing documentation workflows.",
+            "description": "Worked on a clinical documentation platform focused on secure transcription, structured note generation, and clinician-facing workflows.\nBuilt AI-assisted note generation workflows that reduced average note generation time from ~60s to under 30s.\nImproved transcription processing with AWS Transcribe, streaming logic, provider routing, and fallback handling, reducing cost from ~$1.00/hour to ~$0.07/hour.\nBuilt private-data retrieval features using file upload, Pinecone embeddings, and context injection for grounded assistant responses.\nSupported secure backend workflows using scoped authorization, AWS S3, AWS KMS, CloudWatch monitoring, and request-control mechanisms.",
             "technologies": [
                 "JavaScript",
                 "Node.js",
@@ -60,7 +60,7 @@
         },
         {
             "name": "TELUS Marketplace - IoT Connectivity and Device Management Systems",
-            "description": "Contributed to backend and middleware development for TELUS marketplace systems supporting IoT connectivity, SIM-related flows, ordering, and device-management operations.\nWorked across Java-based microservices and enterprise backend components to support scalable business logic, service-to-service communication, and transaction-heavy workflows.\nBuilt GraphQL and Go-based middleware services between frontend applications and backend systems, handling integration flows, response shaping, and API coordination.\nSupported API contracts, distributed integration patterns, debugging, and testing to help deliver stable backend capabilities in an enterprise environment.\nImplemented and hardened Go-based middleware handlers and GraphQL resolvers to improve integration stability between frontend apps and Java backend services, contributing directly to production readiness.\nAuthored and validated API contracts and integration tests using existing test frameworks to reduce integration defects during deployments and simplify debugging for the team.\nProvided hands-on debugging across Java microservices and Go/GraphQL middleware, improving service maintainability and operational readiness through targeted fixes and triage.",
+            "description": "Worked on backend and middleware systems supporting IoT connectivity, SIM-related flows, ordering, and device-management operations.\nBuilt Go and GraphQL middleware between frontend applications and Java backend services for integration flows and response shaping.\nSupported Java microservices, REST APIs, SQL-backed workflows, API contracts, debugging, and integration testing.\nImproved production readiness by fixing integration issues across Go/GraphQL middleware and Java backend services.",
             "technologies": [
                 "JavaScript",
                 "Go",

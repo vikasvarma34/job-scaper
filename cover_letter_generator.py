@@ -36,6 +36,7 @@ def _serialize_job_for_prompt(job_details: Dict[str, Any]) -> str:
         "job_title": job_details.get("job_title", ""),
         "company": job_details.get("company", ""),
         "level": job_details.get("level", ""),
+        "location": job_details.get("location", ""),
         "description": job_details.get("description", ""),
     }
     return json.dumps(payload, indent=2)
@@ -91,6 +92,25 @@ def _load_default_resume_email() -> str:
         return ""
 
 
+def _load_default_resume_location() -> str:
+    resume_path = getattr(config, "BASE_RESUME_PATH", "resume.json")
+    if not os.path.exists(resume_path):
+        return ""
+    try:
+        with open(resume_path, "r", encoding="utf-8") as f:
+            raw_resume = json.load(f)
+        return str(raw_resume.get("location") or "").strip()
+    except Exception:
+        return ""
+
+
+def _resolve_applicant_location(customized_resume: Resume) -> str:
+    default_location = _load_default_resume_location()
+    if default_location:
+        return default_location
+    return str(customized_resume.location or "").strip()
+
+
 def _resolve_contact_email(
     job_details: Dict[str, Any],
     customized_resume: Resume,
@@ -110,7 +130,7 @@ def _resolve_contact_email(
 
 def _build_cover_letter_prompt(job_details: Dict[str, Any], customized_resume: Resume) -> str:
     return f"""
-Write a concise, ATS-friendly cover letter for this software engineering job.
+Write a short, human cover letter for this technology job.
 
 Target job:
 {_serialize_job_for_prompt(job_details)}
@@ -118,30 +138,31 @@ Target job:
 Customized resume:
 {_serialize_resume_for_cover_letter(customized_resume)}
 
-Goals:
-- Sound human, specific, and professional.
-- Use simple, direct English. It should sound like a real application note from Vikas, not an AI-generated letter.
-- Do not sound robotic, generic, over-polished, or dramatic.
-- Do not restate the resume section by section.
-- Do not copy the summary or bullet points verbatim.
-- Add fresh framing, motivation, and role fit.
-- Use important job-description keywords naturally.
-- Keep it to one page, roughly 180 to 280 words.
-- Use simple ATS-safe formatting and plain paragraphs.
-- Do not invent facts, employers, dates, technologies, metrics, or achievements not supported by the customized resume.
+Recruiter mindset:
+- Write like a confident candidate, not like someone begging for an opportunity.
+- Make it feel like a fair give-and-take: the company has a need, and Vikas can contribute useful skills and delivery experience.
+- Use the job description to understand what the team needs.
+- Use the resume only as evidence. Do not retell the resume or copy its bullets.
+- Choose only 1 or 2 relevant proof points from the resume, then explain how they connect to this role.
+- Keep the tone simple, calm, and natural. It should sound like a real person wrote it.
+- If useful, say that Vikas is based in Toronto, Canada and would be happy to relocate to India for this role.
+- Never say or imply that Vikas is currently based in Hyderabad.
+- Do not invent facts, companies, dates, technologies, metrics, or achievements.
 
 Structure:
 - Include a greeting.
-- Write 3 to 5 short paragraphs.
-- Opening: interest in the role and brief fit.
-- Middle: strongest relevant experience and outcomes, with selective evidence from the customized resume.
-- Closing: clear interest in moving forward and a professional sign-off.
+- Write only 2 or 3 short paragraphs total after the greeting.
+- Paragraph 1: mention the role/company and the clearest reason Vikas matches what they need.
+- Paragraph 2: connect one or two relevant resume examples to how Vikas can help the team deliver.
+- Optional paragraph 3: close with calm interest and mention relocation to India if it fits the job context.
+- Keep the full letter roughly 130 to 210 words.
 
 Mandatory formatting:
 - Separate every block with one blank line.
 - Do not return the cover letter as one continuous paragraph.
 - Keep the greeting on its own line.
 - Keep each paragraph as its own block.
+- Do not include the date; the PDF renderer adds it separately.
 - End with exactly this sign-off format, with the name on a separate line:
 
 Sincerely,
@@ -150,13 +171,15 @@ Sincerely,
 
 Writing rules:
 - Mention the company and job title naturally when possible.
-- Focus on why this candidate is a strong fit, not on repeating the full resume.
-- Prefer concrete evidence over buzzwords.
-- Keep the tone warm, capable, and natural, but not fancy.
+- Focus on contribution: what Vikas can help build, improve, support, or deliver for this team.
+- Prefer concrete evidence over broad claims.
+- Match the role family from the job description. For frontend roles, use UI and user-facing product evidence. For backend roles, use APIs, services, databases, integrations, reliability, or security evidence. For AI/LLM, testing, cloud/devops, data, or other roles, choose the strongest matching evidence.
+- Keep the tone warm, capable, and natural, not fancy.
 - Use common words. Prefer "used", "built", "worked on", "improved", and "helped" over formal words like "leveraged", "spearheaded", "orchestrated", "harnessed", or "utilized".
-- Avoid phrases like "I am thrilled", "I am excited to bring", "proven track record", "dynamic", "results-oriented", "robust", "cutting-edge", "seamlessly", "transformative", and "uniquely positioned".
+- Keep sentences short and readable.
+- Avoid phrases like "please consider my application", "I would be grateful", "given the opportunity", "I hope to hear from you", "I am thrilled", "proven track record", "dynamic", "results-oriented", "robust", "cutting-edge", "seamlessly", "transformative", and "uniquely positioned".
+- Job keywords are allowed only when they fit naturally and connect to real work.
 - Avoid generic clichés such as "I am writing to express my interest" unless phrased naturally.
-- Keep each paragraph short, around 2 to 4 sentences.
 - No bullet points.
 
 Return only the final cover letter text.
@@ -237,6 +260,15 @@ def _normalize_cover_letter_text(cover_letter_text: str, applicant_name: str) ->
         blocks.extend(_chunk_sentences(_split_sentences(remaining_body), target_blocks=3))
 
     cleaned_blocks = [block for block in blocks if block]
+    greeting = ""
+    if cleaned_blocks and re.match(r"(?i)^(Dear|Hello|Hi)\b", cleaned_blocks[0]):
+        greeting = cleaned_blocks[0]
+        cleaned_blocks = cleaned_blocks[1:]
+    if len(cleaned_blocks) > 3:
+        cleaned_blocks = cleaned_blocks[:2] + [" ".join(cleaned_blocks[2:]).strip()]
+    if greeting:
+        cleaned_blocks = [greeting] + cleaned_blocks
+
     if signoff_name:
         cleaned_blocks.extend([f"{signoff_word},", signoff_name])
     else:
@@ -248,16 +280,23 @@ def _normalize_cover_letter_text(cover_letter_text: str, applicant_name: str) ->
 def generate_cover_letter(job_details: Dict[str, Any], customized_resume: Resume) -> str:
     prompt = _build_cover_letter_prompt(job_details, customized_resume)
     system_prompt = """
-You are a practical software-engineering cover letter writer and a precise JSON generator.
+You are a practical technology recruiter, cover letter writer, and precise JSON generator.
 
 Rules:
 - Return exactly one valid JSON object matching the required schema.
 - Do not output markdown, commentary, or extra text.
-- Use the job description for targeting and the customized resume for evidence.
+- Use the job description to understand the employer's need.
+- Use the customized resume only as evidence for what Vikas can contribute.
+- Treat the selected job as user-verified for fit.
+- Match the job's role family without copying generic job-posting keywords as filler.
 - Do not repeat the resume line by line.
 - Do not invent unsupported facts.
-- Keep the cover letter concise, human, specific, and ATS-friendly.
-- Use plain English. Avoid over-polished AI language, buzzwords, dramatic enthusiasm, and formal corporate phrasing.
+- Write 2 or 3 short paragraphs after the greeting.
+- Keep the cover letter concise, human, specific, confident, and ATS-friendly.
+- Write like a capable candidate explaining how he can help the company, not like someone asking for a favor.
+- Make the letter feel like give-and-take: company need plus candidate contribution.
+- Use simple plain English for India-focused technology applications. Avoid over-polished AI language, buzzwords, needy phrasing, dramatic enthusiasm, and formal corporate phrasing.
+- Do not favor backend, frontend, Java, Go, Python, AI/LLM, cloud, testing, or any other role family by default. Let the job description decide the emphasis.
 """.strip()
 
     try:
@@ -335,6 +374,7 @@ def generate_cover_letter_for_job(job_id: str, email_override: str | None = None
     except Exception as exc:
         logging.error(f"Failed to parse customized resume {customized_resume_id}: {exc}")
         return 1
+    customized_resume.location = _resolve_applicant_location(customized_resume)
 
     existing_cover_letter = supabase_utils.get_cover_letter_by_job_id(cleaned_job_id)
     if existing_cover_letter:
