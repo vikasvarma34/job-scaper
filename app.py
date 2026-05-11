@@ -10,7 +10,7 @@ from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 
-from flask import Flask, abort, jsonify, redirect, render_template, request, send_file, url_for
+from flask import Flask, Response, abort, jsonify, redirect, render_template, request, send_file, url_for
 from pydantic import ValidationError
 
 import config
@@ -26,9 +26,41 @@ HISTORICAL_APPLIED_STATUSES = {"applied", "previously_applied"}
 SAFE_FOR_FUTURE_STATUS = "safe_for_future"
 TERMINAL_STATUSES = HISTORICAL_APPLIED_STATUSES | {"not_available"}
 HELD_STATUSES = TERMINAL_STATUSES | {SAFE_FOR_FUTURE_STATUS}
+DASHBOARD_JOB_COLUMNS = ",".join(
+    [
+        "job_id",
+        "company",
+        "job_title",
+        "level",
+        "location",
+        "provider",
+        "job_url",
+        "status",
+        "is_active",
+        "application_date",
+        "resume_score",
+        "scraped_at",
+        "last_checked",
+        "job_state",
+        "resume_score_stage",
+        "is_interested",
+        "customized_resume_id",
+        "experience_required",
+        "contact_email_override",
+    ]
+)
 
 app = Flask(__name__)
 app.config["SECRET_KEY"] = os.environ.get("FLASK_SECRET_KEY", "job-scraper-dashboard")
+
+
+@app.before_request
+def require_dashboard_password():
+    if request.endpoint == "static":
+        return None
+    if _is_dashboard_authorized():
+        return None
+    return _basic_auth_challenge()
 
 
 _state_lock = threading.Lock()
@@ -67,6 +99,36 @@ def _env_flag(name: str, default: bool = False) -> bool:
     if not value:
         return default
     return value in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int) -> int:
+    value = str(os.environ.get(name, "")).strip()
+    if not value:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
+
+
+def _dashboard_password() -> str:
+    return str(os.environ.get("DASHBOARD_PASSWORD") or "").strip()
+
+
+def _is_dashboard_authorized() -> bool:
+    password = _dashboard_password()
+    if not password:
+        return True
+    auth = request.authorization
+    return bool(auth and auth.password == password)
+
+
+def _basic_auth_challenge() -> Response:
+    return Response(
+        "Authentication required.",
+        401,
+        {"WWW-Authenticate": 'Basic realm="Job Scraper Dashboard"'},
+    )
 
 
 def _utc_now_iso() -> str:
@@ -558,20 +620,23 @@ def _fetch_all_jobs(batch_size: int = 500) -> tuple[list[dict], str | None]:
     try:
         all_jobs: list[dict] = []
         offset = 0
+        max_jobs = max(0, _env_int("DASHBOARD_MAX_JOBS", 0))
 
         while True:
+            remaining = max_jobs - len(all_jobs) if max_jobs else batch_size
+            current_batch_size = min(batch_size, remaining)
             response = (
                 supabase_utils.supabase.table(config.SUPABASE_TABLE_NAME)
-                .select("*")
+                .select(DASHBOARD_JOB_COLUMNS)
                 .order("scraped_at", desc=True)
-                .range(offset, offset + batch_size - 1)
+                .range(offset, offset + current_batch_size - 1)
                 .execute()
             )
             rows = response.data or []
             if not rows:
                 break
             all_jobs.extend(rows)
-            if len(rows) < batch_size:
+            if len(rows) < current_batch_size:
                 break
             offset += batch_size
 
@@ -625,10 +690,7 @@ def _fetch_dashboard_data() -> dict:
         cover_letter_record = cover_letter_map.get(str(job.get("job_id") or "").strip(), {})
         job["job_url"] = _build_job_url(job.get("job_url"), job.get("provider"), job.get("job_id"))
         stored_experience_required = str(job.get("experience_required") or "").strip()
-        job["experience_required"] = stored_experience_required or _extract_experience_requirement(
-            job.get("description"),
-            job.get("job_title"),
-        )
+        job["experience_required"] = stored_experience_required or "Not stated"
         job["resume_download_url"] = f"/resume/{resume_id}/download" if resume_link else ""
         job["has_resume"] = bool(resume_id)
         job["resume_pdf_available"] = bool(resume_link)
@@ -720,6 +782,38 @@ def stop_action():
 @app.get("/data")
 def data():
     return jsonify(_fetch_dashboard_data())
+
+
+@app.get("/jobs/<job_id>/description")
+def job_description(job_id: str):
+    cleaned_job_id = str(job_id or "").strip()
+    if not cleaned_job_id:
+        return jsonify({"ok": False, "error": "Job ID is required."}), 400
+
+    try:
+        response = (
+            supabase_utils.supabase.table(config.SUPABASE_TABLE_NAME)
+            .select("job_id, job_title, description")
+            .eq("job_id", cleaned_job_id)
+            .limit(1)
+            .execute()
+        )
+    except Exception as exc:
+        return jsonify({"ok": False, "error": f"Failed to load job description: {exc}"}), 500
+
+    rows = response.data or []
+    if not rows:
+        return jsonify({"ok": False, "error": f"Could not find job {cleaned_job_id}."}), 404
+
+    row = rows[0]
+    return jsonify(
+        {
+            "ok": True,
+            "job_id": cleaned_job_id,
+            "job_title": str(row.get("job_title") or "").strip(),
+            "description": str(row.get("description") or "").strip(),
+        }
+    )
 
 
 @app.post("/jobs/<job_id>/applied")

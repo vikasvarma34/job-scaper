@@ -227,6 +227,84 @@ def cleanup_for_free_tier(delete_base_resume: bool, delete_source_resume: bool) 
         return 1
 
 
+def emergency_minimize_supabase() -> int:
+    """
+    Minimize Supabase usage for an emergency free-tier stop.
+
+    Keeps only jobs with status applied/previously_applied, then converts applied
+    rows to previously_applied. All generated documents, source resume storage,
+    base resume rows, cover letters, and customized resume rows are removed.
+    """
+    try:
+        applied_response = (
+            supabase.table(config.SUPABASE_TABLE_NAME)
+            .select("job_id, status")
+            .in_("status", HISTORICAL_APPLIED_STATUSES)
+            .execute()
+        )
+        applied_rows = applied_response.data or []
+        preserved_job_ids = {
+            str(row.get("job_id") or "").strip()
+            for row in applied_rows
+            if str(row.get("job_id") or "").strip()
+        }
+
+        _remove_bucket_files(config.SUPABASE_STORAGE_BUCKET)
+        _remove_bucket_files(config.SUPABASE_RESUME_STORAGE_BUCKET)
+
+        cover_letter_table = getattr(config, "SUPABASE_CUSTOMIZED_COVER_LETTERS_TABLE_NAME", "")
+        if cover_letter_table:
+            supabase.table(cover_letter_table).delete().neq(
+                "id",
+                "00000000-0000-0000-0000-000000000000",
+            ).execute()
+            logging.info("Deleted all customized cover letter rows.")
+
+        supabase.table(config.SUPABASE_CUSTOMIZED_RESUMES_TABLE_NAME).delete().neq(
+            "id",
+            "00000000-0000-0000-0000-000000000000",
+        ).execute()
+        logging.info("Deleted all customized resume rows.")
+
+        supabase.table(config.SUPABASE_BASE_RESUME_TABLE_NAME).delete().neq(
+            "id",
+            "00000000-0000-0000-0000-000000000000",
+        ).execute()
+        logging.info("Deleted all base resume rows.")
+
+        all_job_rows = (
+            supabase.table(config.SUPABASE_TABLE_NAME)
+            .select("job_id")
+            .execute()
+        ).data or []
+        delete_job_ids = [
+            str(row.get("job_id") or "").strip()
+            for row in all_job_rows
+            if str(row.get("job_id") or "").strip()
+            and str(row.get("job_id") or "").strip() not in preserved_job_ids
+        ]
+        if delete_job_ids:
+            supabase.table(config.SUPABASE_TABLE_NAME).delete().in_("job_id", delete_job_ids).execute()
+            logging.info("Deleted %s non-applied job rows.", len(delete_job_ids))
+        else:
+            logging.info("No non-applied job rows to delete.")
+
+        if preserved_job_ids:
+            supabase.table(config.SUPABASE_TABLE_NAME).update(
+                {
+                    "status": "previously_applied",
+                    "customized_resume_id": None,
+                }
+            ).in_("job_id", list(preserved_job_ids)).execute()
+            logging.info("Preserved %s applied-history jobs as previously_applied.", len(preserved_job_ids))
+
+        logging.info("Emergency Supabase minimization completed.")
+        return 0
+    except Exception as e:
+        logging.error(f"Emergency Supabase minimization failed: {e}", exc_info=True)
+        return 1
+
+
 def export_applied_jobs_csv(output_path: str) -> int:
     """
     Exports applied jobs to CSV so history is retained even after cleanup.
@@ -366,6 +444,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Also delete files in resumes bucket (including resume.pdf).",
     )
 
+    subparsers.add_parser(
+        "emergency-minimize",
+        help="Delete storage and all non-applied data, preserving only applied-history jobs.",
+    )
+
     export_parser = subparsers.add_parser("export-applied", help="Export applied jobs to a local CSV file.")
     export_parser.add_argument(
         "--output",
@@ -397,6 +480,9 @@ def main() -> int:
             delete_base_resume=args.delete_base_resume,
             delete_source_resume=args.delete_source_resume,
         )
+
+    if args.command == "emergency-minimize":
+        return emergency_minimize_supabase()
 
     if args.command == "export-applied":
         return export_applied_jobs_csv(args.output)

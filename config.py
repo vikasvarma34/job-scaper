@@ -69,6 +69,15 @@ LLM_SARVAM_MAX_TOKENS = int(os.environ.get("LLM_SARVAM_MAX_TOKENS", "32768"))
 # Legacy experience gate value.
 # The scoring pipeline now keeps jobs instead of skipping them on regex-based experience matches.
 SCORING_MAX_ALLOWED_MIN_EXPERIENCE_YEARS = int(os.environ.get("SCORING_MAX_ALLOWED_MIN_EXPERIENCE_YEARS", "2"))
+SCORING_AUTO_DELETE_ZERO_SCORE = str(os.environ.get("SCORING_AUTO_DELETE_ZERO_SCORE", "true")).strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+SCORING_AUTO_DELETE_ZERO_SCORE_MIN_EXPERIENCE_YEARS = int(
+    os.environ.get("SCORING_AUTO_DELETE_ZERO_SCORE_MIN_EXPERIENCE_YEARS", "3")
+)
 SCORING_REASONING_EFFORT = str(os.environ.get("SCORING_REASONING_EFFORT", "medium")).strip().lower()
 SCORING_FALLBACK_REASONING_EFFORT = str(os.environ.get("SCORING_FALLBACK_REASONING_EFFORT", "low")).strip().lower()
 SCORING_LOG_REASONING_TRACE = str(os.environ.get("SCORING_LOG_REASONING_TRACE", "true")).strip().lower() in {
@@ -228,7 +237,7 @@ LINKEDIN_ALLOWED_LEVEL_KEYWORDS = [
     "junior",
 ]
 LINKEDIN_JOB_TYPE = "F" # F=Full-time, C=Contract, P=Part-time, T=Temporary, I=Internship
-LINKEDIN_JOB_POSTING_DATE = "r259200" # r86400=Past 24h, r259200=Past 3 days, r604800=Past week
+LINKEDIN_JOB_POSTING_DATE = "r86400" # r86400=Past 24h, r259200=Past 3 days, r604800=Past week
 LINKEDIN_F_WT = None # Set 1=Onsite, 2=Remote, 3=Hybrid, or None for all
 # Prefilter controls to reduce wasted detail-fetch calls.
 LINKEDIN_PREFILTER_BY_TITLE_BEFORE_DETAILS = False
@@ -258,7 +267,7 @@ NAUKRI_LOCATIONS = LINKEDIN_LOCATIONS
 NAUKRI_BROAD_LOCATIONS = ["India"]
 NAUKRI_RESULTS_PER_PAGE = 20
 NAUKRI_MAX_PAGES_PER_QUERY = 2
-NAUKRI_FRESHNESS_DAYS = 3
+NAUKRI_FRESHNESS_DAYS = 1
 
 INDEED_INDIA_SEARCH_QUERIES = LINKEDIN_SEARCH_QUERIES
 INDEED_INDIA_LOCATIONS = LINKEDIN_LOCATIONS

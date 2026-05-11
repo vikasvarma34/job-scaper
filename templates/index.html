@@ -430,6 +430,34 @@
         return "score-light";
       }
 
+      function parseExperienceInfo(rawExperience) {
+        const normalized = String(rawExperience || "").trim().toLowerCase();
+        if (!normalized || normalized === "not stated") {
+          return { isNotStated: true, minYears: null };
+        }
+        const match = normalized.match(/\d+/);
+        if (!match) {
+          return { isNotStated: true, minYears: null };
+        }
+        const minYears = Number.parseInt(match[0], 10);
+        if (Number.isNaN(minYears)) {
+          return { isNotStated: true, minYears: null };
+        }
+        return { isNotStated: false, minYears };
+      }
+
+      function shouldHideJobInBrowser(job) {
+        if (job.resume_score === null || job.resume_score === undefined) {
+          return false;
+        }
+        const score = Number(job.resume_score);
+        const expInfo = parseExperienceInfo(job.experience_required);
+        if (!Number.isNaN(score) && score === 0 && expInfo.minYears !== null && expInfo.minYears >= 3) {
+          return true;
+        }
+        return false;
+      }
+
       function getStatusBadgeMarkup(job) {
         const normalizedStatus = normalizeStatus(job);
         let tone = "neutral";
@@ -515,7 +543,7 @@
         }
 
         actions.push(
-          `<button class="mini-button ghost" data-copy-jd="true" data-job-title="${escapeHtml(job.job_title || "")}" data-job-description="${escapeHtml(job.description || "")}">Copy Job Description</button>`
+          `<button class="mini-button ghost" data-copy-jd="true" data-job-id="${jobId}" data-job-title="${escapeHtml(job.job_title || "")}">Copy Job Description</button>`
         );
 
         const statusPill = normalizedStatus === "applied"
@@ -749,11 +777,12 @@
             job.job_title || "",
             job.company || "",
             job.job_id || "",
-            job.location || "",
-            job.description || ""
+            job.location || ""
           ].join(" ").toLowerCase();
           const matchesSearch = !searchTerm || searchable.includes(searchTerm);
-          return matchesSearch && matchesStatusFilter(job, filterValue);
+          return matchesSearch
+            && matchesStatusFilter(job, filterValue)
+            && !shouldHideJobInBrowser(job);
         });
 
         renderFilterCounts(items);
@@ -820,7 +849,57 @@
           `;
         };
 
-        jobsList.innerHTML = visibleJobs.map((job) => renderJobCard(job)).join("");
+        const exactFitJobs = [];
+        const threePlusJobs = [];
+        const notStatedJobs = [];
+
+        visibleJobs.forEach((job) => {
+          const expInfo = parseExperienceInfo(job.experience_required);
+          if (expInfo.isNotStated) {
+            notStatedJobs.push(job);
+            return;
+          }
+          if (expInfo.minYears !== null && expInfo.minYears >= 3) {
+            threePlusJobs.push(job);
+            return;
+          }
+          exactFitJobs.push(job);
+        });
+
+        const renderGroup = (title, description, groupJobs) => {
+          if (!groupJobs.length) {
+            return "";
+          }
+          return `
+            <section class="source-group">
+              <header class="source-group-header">
+                <h3>${escapeHtml(title)} (${groupJobs.length})</h3>
+                <p>${escapeHtml(description)}</p>
+              </header>
+              <div class="source-group-grid">
+                ${groupJobs.map((job) => renderJobCard(job)).join("")}
+              </div>
+            </section>
+          `;
+        };
+
+        jobsList.innerHTML = [
+          renderGroup(
+            "Experience Match (0-2 years)",
+            "Best match for your target ranges like 0-1, 0+, 2+, 2-4, and 2-5.",
+            exactFitJobs
+          ),
+          renderGroup(
+            "3+ Years Experience",
+            "Higher-experience roles are separated here.",
+            threePlusJobs
+          ),
+          renderGroup(
+            "Experience Not Stated",
+            "Roles where the requirement is missing or unclear.",
+            notStatedJobs
+          ),
+        ].join("");
 
         bindAppliedButtons();
         bindSafeFutureButtons();
@@ -907,6 +986,10 @@
         renderStats(data.stats || {});
         renderJobs(allJobs);
         return data;
+      }
+
+      async function refreshStatusOnly() {
+        await loadStatus();
       }
 
       async function refreshDashboard() {
@@ -1057,19 +1140,44 @@
       }
 
       async function copyJobDescription(button) {
+        const jobId = button.dataset.jobId || "";
         const jobTitle = button.dataset.jobTitle || "";
-        const jobDescription = button.dataset.jobDescription || "";
+        if (!jobId) {
+          alert("Job ID is missing.");
+          return;
+        }
+
+        const originalText = button.textContent;
+        button.disabled = true;
+        button.textContent = "Loading";
+        let jobDescription = "";
+        try {
+          const response = await fetch(`${jobsBaseUrl}/${encodeURIComponent(jobId)}/description`);
+          const payload = await response.json();
+          if (!response.ok) {
+            throw new Error(payload.error || "Could not load the job description.");
+          }
+          jobDescription = payload.description || "";
+        } catch (error) {
+          alert(error.message || "Could not load the job description.");
+          button.disabled = false;
+          button.textContent = originalText;
+          return;
+        }
+
         const copyText = `Job title: ${jobTitle}\nJob description: ${jobDescription}`;
 
         try {
           await navigator.clipboard.writeText(copyText);
-          const originalText = button.textContent;
           button.textContent = "Copied";
           window.setTimeout(() => {
             button.textContent = originalText;
+            button.disabled = false;
           }, 1200);
         } catch (error) {
           alert("Could not copy the job description.");
+          button.disabled = false;
+          button.textContent = originalText;
         }
       }
 
@@ -1079,7 +1187,7 @@
         }
         const intervalMs = lastKnownTaskStatus === "running" ? 1500 : 4000;
         refreshTimer = window.setTimeout(async () => {
-          await refreshDashboard();
+          await refreshStatusOnly();
           scheduleRefreshLoop();
         }, intervalMs);
       }
@@ -1214,7 +1322,7 @@
       renderState(initialState);
       renderStats(initialStats);
       renderJobs(allJobs);
-      refreshDashboard().then(scheduleRefreshLoop);
+      loadStatus().then(scheduleRefreshLoop);
     </script>
   </body>
 </html>
