@@ -1,0 +1,77 @@
+{
+  "name": "Vikas Varma Pokala",
+  "title": "Full Stack Engineer",
+  "email": "vikaspokala96@gmail.com",
+  "phone": "+1-437-460-4737",
+  "location": "Hyderabad, India",
+  "links": {
+    "linkedin": "https://linkedin.com/in/vikas-pokala-ab0038291",
+    "github": "",
+    "portfolio": ""
+  },
+  "summary": "Full-stack engineer with 2 years of production experience, primarily Node.js with Java and Go. At a small Toronto startup with no senior engineer above me, owned the backend for two healthcare products: a configurable assessment platform deployed at the University of Toronto, and a live clinical-documentation product used by 250+ doctors across Toronto clinics. One year of that was spent on contract at TELUS, working across Java microservices and a Go + GraphQL middleware. Comfortable building production AI features — LLM integrations, RAG, streaming multilingual transcription — and writing React on the frontend when the work needs it.",
+  "skills": {
+    "Languages": "JavaScript (Node.js), TypeScript, Java, Go",
+    "Backend": "Express.js, Spring Boot, REST APIs, GraphQL, WebSockets, Kafka consumers, Microservices",
+    "Frontend": "React",
+    "Databases": "MongoDB, Firebase Firestore, MySQL, Oracle",
+    "Cloud / DevOps": "AWS (Transcribe, S3, KMS, CloudWatch), GCP, Firebase, Vercel, Docker",
+    "Auth & Security": "JWT, OAuth 2.0, Firebase Auth, encryption-at-rest, rate limiting",
+    "AI Integrations": "OpenAI, Gemini, Pinecone, RAG, Soniox, AWS Transcribe, Recall.ai"
+  },
+  "experience": [
+    {
+      "company": "Markitech AI",
+      "location": "Toronto, Canada",
+      "title": "Full Stack Developer",
+      "start_date": "Feb 2024",
+      "end_date": "Feb 2026",
+      "project_blocks": [
+        {
+          "project": "CliniScripts — Live AI Clinical Documentation Product (~100 → 250+ doctors)",
+          "period": "Aug 2025 – Feb 2026",
+          "bullets": [
+            "Replaced AWS Transcribe with Soniox for live streaming transcription. Ran both providers in parallel behind a per-doctor setting for ~3 months before phasing AWS out — cost dropped from ~$1.00/hr to ~$0.10/hr, and the product picked up French, Spanish, Hindi, Urdu, and 40+ other languages it couldn't handle before.",
+            "Halved AI note-generation time (~60s → ~20–30s) by cutting redundant backend steps and tightening regex post-processing. Added token streaming on top, so doctors see the note appear live as it's generated rather than waiting on the full response.",
+            "Integrated Recall.ai for virtual sessions on Google Meet, Zoom, Teams, and Webex: continuous transcript chunks coming in via webhook, handled with ordering and retry logic, then pushed to the frontend over WebSockets for live UI rendering.",
+            "Led the security pass toward HIPAA-aligned workflows: added JWT-based service auth and OAuth 2.0 sign-in on top of password login, encrypted notes and audio at rest, and added per-endpoint rate limiting to stop subscription sharing across devices.",
+            "Built an external integration product so partner companies could embed transcription and note generation under their own brand — separate API surface, dashboard for API-key issuance, usage tracked by hours and notes feeding into billing, and developer documentation with sample code.",
+            "Alongside CliniScripts, took on several short-cycle AI side projects for adjacent clinic and partner use cases — typically a few weeks each, end-to-end backend ownership."
+          ]
+        },
+        {
+          "project": "TELUS Marketplace — Enterprise IoT Connectivity Platform (Markitech contract engagement)",
+          "period": "Aug 2024 – Aug 2025",
+          "bullets": [
+            "Owned the GraphQL signup endpoint on the marketplace login service: orchestrated writes across multiple downstream Java/Spring Boot microservices (org creation, customer + billing addresses, password hashing, terms-acceptance branching) plus the email-confirmation flow, including cross-service error coordination.",
+            "On the Kafka-consumer email-notifications microservice (Java/Spring Boot): added new notification types, fixed templating bugs, and built a generic email-template API that other teams across the project reused instead of duplicating the logic in their own services.",
+            "Wrote Go + GraphQL resolvers in the BFF middleware layer between the React frontend and Java microservices — aggregating across multiple backend endpoints and shaping responses to expose only the fields the frontend actually needed. First production Go work, code reviewed by senior TELUS engineers before every staging push."
+          ]
+        },
+        {
+          "project": "CliniAssess — Configurable Pre-Visit Assessment Platform (deployed at University of Toronto, 30+ doctors)",
+          "period": "Feb 2024 – Aug 2024",
+          "bullets": [
+            "Sole backend developer (no senior engineer above me) on a Node.js/MongoDB platform for pre-visit questionnaires — PHQ-9, GAD-7, OCD, substance-use, plus custom forms — sent to patients before their first appointment.",
+            "Designed the data model and runtime rule engine for a configurable form builder: question types (single-choice, multi-choice, text), answer-based branching (\"if answer is X, jump to question 5\"), and per-form scoring — all stored as data so the University admin could add or edit forms through the UI without code changes.",
+            "Made the patient flow passwordless: unique per-assessment link in email, server-side state keyed to the link, so patients could pause mid-questionnaire and resume on another device without ever logging in.",
+            "Integrated OpenAI for end-of-assessment clinical summaries: JSON-schema structured output, per-form prompts, configurable summary length per doctor, plus failure handling for rate limits, malformed responses, and timeouts. Summaries stored with per-doctor retention policies (1 / 7 / 30 / 60 / 90 days).",
+            "Wrote the patient-facing React UI as a generic form renderer driven entirely by backend config — so any admin-added form rendered correctly without a UI change — plus the doctor dashboard backend (form assignment, response viewing, summary editing) and the University admin backend."
+          ]
+        }
+      ]
+    }
+  ],
+  "education": [
+    {
+      "degree": "Postgraduate Diploma, Quality Engineering Management",
+      "institution": "Lambton College, Sarnia, Canada",
+      "period": "Sep 2021 – May 2023"
+    },
+    {
+      "degree": "B.Tech, Mechanical Engineering",
+      "institution": "National Institute of Technology, Warangal",
+      "period": "Aug 2016 – Aug 2020"
+    }
+  ]
+}
