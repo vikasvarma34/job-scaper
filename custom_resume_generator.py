@@ -873,7 +873,7 @@ def apply_resume_patch(
         change_log.append(ResumeV2ChangeLogItem(type="skill_reorder", reason=f"Reordered skills in '{cat}'"))
 
     # 2. Keep project blocks in base order. The base order is reverse chronological;
-    # moving TELUS above newer CliniScripts work confused the timeline in recruiter scans.
+    # moving older work ahead of newer work confuses the timeline in recruiter scans.
     if patch.experience_project_reorders:
         warnings.append("experience_project_reorder: ignored; ResumeV2 keeps project blocks in base reverse-chronological order")
 
@@ -987,7 +987,7 @@ Decide:
 1. What role family this job fits best.
 2. Whether the summary needs a light rebalance. If yes, write one that keeps 70%+ of the original words and does not add job-posting adjectives the original summary doesn't already have. Start broad as Full Stack Engineer or Software Engineer, then mention backend strength naturally.
 3. Whether any skills need to be reordered within their categories to bring job-relevant ones forward. Reordering skills is the safest way to align with a job — prefer it over bullet edits.
-4. Keep project blocks in the exact base order. Do not move TELUS ahead of newer CliniScripts work just because the job is Java-heavy.
+4. Keep project blocks in the exact base order. Do not move older work ahead of newer work just because the job aligns with an earlier project.
 5. Keep bullets in the exact base order inside each project block.
 6. Do not propose bullet edits. The approved experience bullets are final and should be preserved exactly.
 7. Do not drop bullets for length in this flow. Prefer a truthful 1.5-2 page resume over removing useful evidence.

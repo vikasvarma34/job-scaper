@@ -9,7 +9,7 @@
     "github": "",
     "portfolio": ""
   },
-  "summary": "Full-stack engineer with 2 years of production experience. At a small Toronto startup with no senior engineer above me, owned the backend (and shipped React UIs when needed) for two healthcare products — one for pre-visit assessments, deployed at the University of Toronto, and one for clinical documentation, used by 250+ doctors across Toronto clinics. One of those two years was spent on contract at TELUS Marketplace, working across Java microservices and a Go + GraphQL middleware.",
+  "summary": "Full-stack engineer with 2+ years of production experience building healthcare, telecom marketplace, and education-focused web systems. At a Toronto startup, owned backend development and shipped React UIs for two healthcare products—one deployed at the University of Toronto for pre-visit assessments and another used by 250+ doctors across Toronto clinics for clinical documentation. Also spent one year on contract at TELUS Marketplace, working across Java microservices and a Go + GraphQL middleware layer.",
   "skills": {
     "Languages": "JavaScript, TypeScript, Java, Go",
     "Backend": "Node.js, Express.js, Spring Boot, REST APIs, GraphQL, WebSockets, Kafka consumers, Microservices",
@@ -20,6 +20,25 @@
     "AI Integrations": "OpenAI, Gemini, Pinecone, RAG, Soniox, AWS Transcribe, Recall.ai"
   },
   "experience": [
+    {
+      "company": "Sri Sai Educational Society",
+      "location": "Kodad, India",
+      "title": "Full Stack Developer – AI & Web Applications",
+      "start_date": "Mar 2026",
+      "end_date": "Present",
+      "project_blocks": [
+        {
+          "project": "Institution Digital Systems — Website, Email, and College Portal",
+          "period": "Mar 2026 – Present",
+          "bullets": [
+            "Leading the redesign of the institution website and cleanup of its domain and official email setup, reorganizing public content and building reusable React components for academic, admissions, and institutional updates.",
+            "Architecting a role-based college portal with 1 shared sign-in and 3 tailored experiences for students, faculty, and administrators, using React with 2 backend service stacks: Node.js/Express.js with TypeScript and Java/Spring Boot.",
+            "Designing and building the attendance module around 5 core workflows—student and faculty mapping, daily attendance entry, record corrections, permission checks, and administrative review—with the data model prepared for future summaries and reporting.",
+            "Defining 4 additional academic workflows for phased delivery: results publishing, notes and resource sharing, announcements, and internal student–faculty communication, alongside the initial validation, testing, and deployment foundations."
+          ]
+        }
+      ]
+    },
     {
       "company": "Markitech AI",
       "location": "Toronto, Canada",

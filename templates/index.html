@@ -15,6 +15,7 @@
           <p class="topbar-copy">A calmer, more deliberate control center for sourcing, tailoring, and shipping applications.</p>
         </div>
         <div class="topbar-actions">
+          <button id="base-resume-download-button" class="secondary-button" type="button">Download Base Resume</button>
           <a class="secondary-button link-button" href="#jobs-browser">Browse Jobs</a>
           <button id="refresh-button" class="secondary-button">Refresh Data</button>
           <div class="provider-switch" aria-label="Resume generation provider">
@@ -246,6 +247,7 @@
       const dataUrl = "{{ url_for('data') }}";
       const runUrl = "{{ url_for('run_action') }}";
       const stopUrl = "{{ url_for('stop_action') }}";
+      const baseResumeDownloadUrl = "{{ url_for('download_base_resume') }}";
       const clearScoresUrl = "/scores/clear";
       const jobsBaseUrl = "/jobs";
       const editBaseUrl = "/edit";
@@ -263,6 +265,7 @@
       const resumeCountInput = document.getElementById("resume-count-input");
       const emailOverrideInput = document.getElementById("email-override-input");
       const refreshButton = document.getElementById("refresh-button");
+      const baseResumeDownloadButton = document.getElementById("base-resume-download-button");
       const clearScoresButton = document.getElementById("clear-scores-button");
       const stopTaskButton = document.getElementById("stop-task-button");
       const saveLogsButton = document.getElementById("save-logs-button");
@@ -1139,6 +1142,41 @@
         scheduleRefreshLoop();
       }
 
+      async function downloadBaseResume() {
+        if (!baseResumeDownloadButton) {
+          return;
+        }
+
+        const originalText = baseResumeDownloadButton.textContent;
+        baseResumeDownloadButton.disabled = true;
+        baseResumeDownloadButton.textContent = "Generating";
+
+        try {
+          const response = await fetch(baseResumeDownloadUrl, {
+            headers: { "Accept": "application/pdf" }
+          });
+          if (!response.ok) {
+            const errorText = await response.text();
+            throw new Error(errorText || "Failed to generate the base resume.");
+          }
+
+          const blob = await response.blob();
+          const downloadUrl = window.URL.createObjectURL(blob);
+          const link = document.createElement("a");
+          link.href = downloadUrl;
+          link.download = "Vikas_Varma_Pokala_Base_Resume.pdf";
+          document.body.appendChild(link);
+          link.click();
+          link.remove();
+          window.URL.revokeObjectURL(downloadUrl);
+        } catch (error) {
+          alert(error.message || "Failed to download the base resume.");
+        } finally {
+          baseResumeDownloadButton.disabled = false;
+          baseResumeDownloadButton.textContent = originalText;
+        }
+      }
+
       async function copyJobDescription(button) {
         const jobId = button.dataset.jobId || "";
         const jobTitle = button.dataset.jobTitle || "";
@@ -1300,6 +1338,9 @@
       });
       if (clearScoresButton) {
         clearScoresButton.addEventListener("click", clearScores);
+      }
+      if (baseResumeDownloadButton) {
+        baseResumeDownloadButton.addEventListener("click", downloadBaseResume);
       }
       if (stopTaskButton) {
         stopTaskButton.addEventListener("click", stopRunningTask);

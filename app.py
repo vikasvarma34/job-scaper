@@ -164,6 +164,10 @@ def _build_cover_letter_download_name(company: object) -> str:
     return f"VIKAS_POKALA_{_company_first_filename_token(company)}_CL.PDF"
 
 
+def _build_base_resume_download_name() -> str:
+    return "Vikas_Varma_Pokala_Base_Resume.pdf"
+
+
 def _build_resume_storage_path(job_id: str, company: object) -> str:
     company_token = _sanitize_filename_token(company, default="COMPANY")
     job_token = _sanitize_filename_token(job_id, default="JOB")
@@ -1026,6 +1030,25 @@ def download_resume(resume_id: str):
         mimetype="application/pdf",
         as_attachment=True,
         download_name=file_name,
+    )
+
+
+@app.get("/resume/base/download")
+def download_base_resume():
+    base_resume = custom_resume_generator._load_base_resume_details()  # noqa: SLF001
+    if base_resume is None:
+        abort(500, f"Could not load base resume from {config.BASE_RESUME_PATH}.")
+
+    try:
+        resume_pdf = pdf_generator.create_resume_pdf(base_resume)
+    except Exception as exc:
+        abort(500, f"Failed to generate base resume PDF: {exc}")
+
+    return send_file(
+        io.BytesIO(resume_pdf),
+        mimetype="application/pdf",
+        as_attachment=True,
+        download_name=_build_base_resume_download_name(),
     )
 
 
