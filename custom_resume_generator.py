@@ -9,14 +9,21 @@ import re
 import asyncio 
 import math
 import io
+import ast
+from difflib import SequenceMatcher
 import pdfplumber
 import resume_validator
 import requests
 from llm_client import primary_client
 from models import (
-    Resume, SummaryOutput, SkillsOutput, SingleExperienceOutput,
+    Resume, ResumeLike, SummaryOutput, SkillsOutput, SingleExperienceOutput,
     SingleProjectOutput,
-    ATSKeywordPlan, ATSResumeRewriteOutput
+    ATSKeywordPlan, ATSResumeRewriteOutput,
+    ResumeV2, ResumeV2ChangeLogItem,
+    ResumePatch, ResumePatchBulletEdit, ResumePatchBulletDrop,
+    ResumePatchProjectBlockReorder, ResumePatchSkillCategoryReorder,
+    ResumePatchExperienceProjectReorder,
+    is_resume_v2_model, parse_resume_data
 )
 import time
 import os
@@ -24,29 +31,35 @@ import os
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 RESUME_GENERATION_TEMPERATURE = 0.6
+# ResumeV2 controlled-editing temperatures — lower than legacy to prevent creative drift.
+RESUME_V2_PATCH_TEMPERATURE = 0.1
+RESUME_V2_PATCH_MAX_OUTPUT_TOKENS = 4096
+RESUME_MODE_BALANCED = "balanced"
 RESUME_MODE_ONE_PAGE = "one_page"
 RESUME_MODE_PROJECTS = "project_mode"
-SUPPORTED_RESUME_MODES = {RESUME_MODE_ONE_PAGE, RESUME_MODE_PROJECTS}
+SUPPORTED_RESUME_MODES = {RESUME_MODE_BALANCED, RESUME_MODE_ONE_PAGE, RESUME_MODE_PROJECTS}
 
 
 def _normalize_resume_mode(value: Any) -> str:
     mode = str(value or "").strip().lower().replace("-", "_")
     aliases = {
-        "default": RESUME_MODE_ONE_PAGE,
-        "onepage": RESUME_MODE_ONE_PAGE,
-        "one_page": RESUME_MODE_ONE_PAGE,
-        "no_projects": RESUME_MODE_ONE_PAGE,
-        "compact": RESUME_MODE_ONE_PAGE,
+        "default": RESUME_MODE_BALANCED,
+        "balanced": RESUME_MODE_BALANCED,
+        "standard": RESUME_MODE_BALANCED,
+        "onepage": RESUME_MODE_BALANCED,
+        "one_page": RESUME_MODE_BALANCED,
+        "no_projects": RESUME_MODE_BALANCED,
+        "compact": RESUME_MODE_BALANCED,
         "projects": RESUME_MODE_PROJECTS,
         "project": RESUME_MODE_PROJECTS,
         "project_mode": RESUME_MODE_PROJECTS,
         "include_projects": RESUME_MODE_PROJECTS,
     }
-    return aliases.get(mode, RESUME_MODE_ONE_PAGE)
+    return aliases.get(mode, RESUME_MODE_BALANCED)
 
 
 def _resume_mode_label(mode: str) -> str:
-    return "Project Mode" if _normalize_resume_mode(mode) == RESUME_MODE_PROJECTS else "One-Page Mode"
+    return "Project Mode" if _normalize_resume_mode(mode) == RESUME_MODE_PROJECTS else "Balanced Mode"
 
 
 def _log_keyword_plan_response(job_id: Any, llm_output: str) -> None:
@@ -104,6 +117,35 @@ def _postprocess_keyword_plan(plan: ATSKeywordPlan) -> ATSKeywordPlan:
         hard_skills=_clean(list(plan.hard_skills), blocklist=hard_blocklist, max_items=16),
         soft_skills=_clean(list(plan.soft_skills), blocklist=soft_blocklist, max_items=10),
     )
+
+
+def _log_v2_llm_provider(job_id: Any) -> None:
+    model = str(getattr(config, "LLM_MODEL", "") or getattr(primary_client, "model", "") or "").strip()
+    provider = model.split("/", 1)[0] if "/" in model else model
+    if _is_sarvam_resume_model():
+        transport = "direct_sarvam"
+    elif primary_client._is_gemini_model(model):  # noqa: SLF001
+        transport = "direct_gemini"
+    else:
+        transport = "litellm"
+    logging.info(
+        "ResumeV2 LLM configuration for job_id %s: provider=%s, model=%s, transport=%s",
+        job_id,
+        provider or "unknown",
+        model or "unknown",
+        transport,
+    )
+
+
+def _v2_project_block_debug_summary(resume: ResumeV2) -> tuple[list[str], dict[str, int]]:
+    project_names: list[str] = []
+    bullets_per_project: dict[str, int] = {}
+    for experience in resume.experience:
+        for block in experience.project_blocks:
+            project_name = str(block.project or "").strip() or "<empty project>"
+            project_names.append(project_name)
+            bullets_per_project[project_name] = len(block.bullets or [])
+    return project_names, bullets_per_project
 
 
 def _extract_json_payload(raw_text: Any) -> str:
@@ -292,10 +334,62 @@ def _normalize_resume_rewrite_payload(payload: Any) -> Any:
 
 def _parse_structured_json_output(raw_output: Any) -> dict[str, Any]:
     payload_text = _extract_json_payload(raw_output)
-    parsed = json.loads(payload_text)
-    if not isinstance(parsed, dict):
-        raise ValueError("Structured output did not contain a JSON object.")
-    return parsed
+    parse_errors: list[str] = []
+
+    def _attempt_json_load(text: str) -> dict[str, Any] | None:
+        try:
+            maybe = json.loads(text)
+            if isinstance(maybe, dict):
+                return maybe
+            raise ValueError("Structured output did not contain a JSON object.")
+        except Exception as exc:  # noqa: BLE001
+            parse_errors.append(str(exc))
+            return None
+
+    # 1) Strict JSON first.
+    parsed = _attempt_json_load(payload_text)
+    if parsed is not None:
+        return parsed
+
+    candidate = str(payload_text or "").strip()
+    # 2) Normalize smart quotes + remove trailing commas.
+    candidate = (
+        candidate
+        .replace("\u201c", '"')
+        .replace("\u201d", '"')
+        .replace("\u2018", "'")
+        .replace("\u2019", "'")
+    )
+    candidate = re.sub(r",\s*([}\]])", r"\1", candidate)
+    parsed = _attempt_json_load(candidate)
+    if parsed is not None:
+        logging.warning("Recovered malformed structured JSON via trailing-comma cleanup.")
+        return parsed
+
+    # 3) Quote bare object keys: { foo: "bar" } -> { "foo": "bar" }.
+    candidate_with_quoted_keys = re.sub(
+        r'([{\[,]\s*)([A-Za-z_][A-Za-z0-9_-]*)(\s*:)',
+        r'\1"\2"\3',
+        candidate,
+    )
+    parsed = _attempt_json_load(candidate_with_quoted_keys)
+    if parsed is not None:
+        logging.warning("Recovered malformed structured JSON via bare-key quoting.")
+        return parsed
+
+    # 4) Fallback for Python-style dict output (single quotes, True/False/None).
+    try:
+        maybe_literal = ast.literal_eval(candidate_with_quoted_keys)
+        if isinstance(maybe_literal, dict):
+            logging.warning("Recovered malformed structured JSON via literal_eval fallback.")
+            return maybe_literal
+    except Exception as exc:  # noqa: BLE001
+        parse_errors.append(str(exc))
+
+    raise ValueError(
+        "Failed to parse structured JSON output after recovery attempts. "
+        f"Errors: {' | '.join(parse_errors[:3])}"
+    )
 
 
 def _generate_structured_output(
@@ -305,6 +399,7 @@ def _generate_structured_output(
     *,
     temperature: float = RESUME_GENERATION_TEMPERATURE,
     max_tokens: int | None = None,
+    use_direct_gemini: bool = False,
 ) -> Any:
     if _is_sarvam_resume_model():
         raw_output = _request_sarvam_direct(
@@ -312,6 +407,14 @@ def _generate_structured_output(
             system_prompt=system_prompt,
             temperature=temperature,
             max_tokens=max_tokens,
+        )
+    elif use_direct_gemini:
+        raw_output = primary_client.generate_content_direct_gemini(
+            prompt=prompt,
+            system_prompt=system_prompt,
+            temperature=temperature,
+            response_format=response_model,
+            max_output_tokens=max_tokens,
         )
     else:
         raw_output = primary_client.generate_content(
@@ -321,8 +424,57 @@ def _generate_structured_output(
             response_format=response_model,
         )
 
-    parsed = _normalize_resume_rewrite_payload(_parse_structured_json_output(raw_output))
-    return response_model.model_validate(parsed)
+    try:
+        parsed = _normalize_resume_rewrite_payload(_parse_structured_json_output(raw_output))
+        return response_model.model_validate(parsed)
+    except Exception as first_exc:  # noqa: BLE001
+        raw_text = str(raw_output or "")
+        preview = raw_text[:800].replace("\n", "\\n")
+        logging.warning(
+            "Structured output parse failed. Attempting one JSON repair pass. Error=%s | raw_preview=%s",
+            first_exc,
+            preview,
+        )
+
+        repair_system_prompt = (
+            "You are a strict JSON repair assistant. "
+            "Return exactly one valid JSON object matching the given schema. "
+            "Do not add commentary or markdown."
+        )
+        repair_prompt = (
+            "Repair the following malformed JSON-like output so it becomes strict JSON.\n\n"
+            "Output schema (JSON Schema):\n"
+            f"{json.dumps(response_model.model_json_schema(), ensure_ascii=False)}\n\n"
+            "Malformed output to repair:\n"
+            f"{raw_text}\n\n"
+            "Return only the repaired JSON object."
+        )
+
+        if _is_sarvam_resume_model():
+            repaired_output = _request_sarvam_direct(
+                prompt=repair_prompt,
+                system_prompt=repair_system_prompt,
+                temperature=0,
+                max_tokens=max_tokens,
+            )
+        elif use_direct_gemini:
+            repaired_output = primary_client.generate_content_direct_gemini(
+                prompt=repair_prompt,
+                system_prompt=repair_system_prompt,
+                temperature=0,
+                response_format=response_model,
+                max_output_tokens=max_tokens,
+            )
+        else:
+            repaired_output = primary_client.generate_content(
+                prompt=repair_prompt,
+                system_prompt=repair_system_prompt,
+                temperature=0,
+                response_format=response_model,
+            )
+
+        parsed = _normalize_resume_rewrite_payload(_parse_structured_json_output(repaired_output))
+        return response_model.model_validate(parsed)
 
 
 def _sanitize_filename_token(value: Any, default: str = "UNKNOWN") -> str:
@@ -347,7 +499,7 @@ def _build_resume_filename(job_id: str, company: Any) -> str:
     return f"VIKAS_POKALA_{company_token}_{job_token}.pdf"
 
 
-def _serialize_resume_for_prompt(resume: Resume) -> str:
+def _serialize_resume_for_prompt(resume: ResumeLike) -> str:
     """
     Convert the resume model to JSON for LLM prompt context.
     """
@@ -367,10 +519,592 @@ def _serialize_job_for_prompt(job_details: Dict[str, Any]) -> str:
     return json.dumps(job_payload, indent=2)
 
 
-def _load_base_resume_details() -> Resume | None:
+def _serialize_v2_job_for_prompt(job_details: Dict[str, Any]) -> str:
+    job_payload = {
+        "job_id": job_details.get("job_id", ""),
+        "job_title": job_details.get("job_title", ""),
+        "company": job_details.get("company", ""),
+        "level": job_details.get("level", ""),
+        "location": job_details.get("location", ""),
+        "description": job_details.get("description", ""),
+    }
+    return json.dumps(job_payload, indent=2, ensure_ascii=False)
+
+
+def _serialize_resume_v2_for_prompt(resume: ResumeV2) -> str:
+    return json.dumps(resume.model_dump(), indent=2, ensure_ascii=False)
+
+
+def assign_resume_ids(base_resume: ResumeV2) -> dict:
+    """
+    Returns a flat dict with three entry types keyed by ID string:
+      "expN"              → exp_idx (int)
+      "expN.projM"        → (exp_idx, proj_idx)
+      "expN.projM.bulletK"→ (exp_idx, proj_idx, bullet_idx, original_text)
+    IDs are deterministic from base resume order, recomputed each call.
+    """
+    id_map: dict = {}
+    for exp_idx, exp in enumerate(base_resume.experience):
+        exp_id = f"exp{exp_idx}"
+        id_map[exp_id] = exp_idx
+        for proj_idx, block in enumerate(exp.project_blocks):
+            proj_id = f"exp{exp_idx}.proj{proj_idx}"
+            id_map[proj_id] = (exp_idx, proj_idx)
+            for bullet_idx, bullet in enumerate(block.bullets):
+                bid = f"exp{exp_idx}.proj{proj_idx}.bullet{bullet_idx}"
+                id_map[bid] = (exp_idx, proj_idx, bullet_idx, bullet)
+    return id_map
+
+
+def _build_id_annotated_resume(base_resume: ResumeV2) -> str:
+    lines: list[str] = []
+    lines.append(f"Name: {base_resume.name}")
+    lines.append(f"Title: {base_resume.title}")
+    lines.append(f"Email: {base_resume.email} | Phone: {base_resume.phone} | Location: {base_resume.location}")
+    lines.append("")
+    lines.append(f"[summary] {base_resume.summary}")
+    lines.append("")
+    lines.append("Skills:")
+    for category, values in base_resume.skills.items():
+        lines.append(f"  {category}: {values}")
+    lines.append("")
+    lines.append("Experience:")
+    for exp_idx, exp in enumerate(base_resume.experience):
+        exp_id = f"exp{exp_idx}"
+        lines.append(f"  [{exp_id}] {exp.company} | {exp.title} | {exp.start_date} – {exp.end_date}")
+        for proj_idx, block in enumerate(exp.project_blocks):
+            proj_id = f"exp{exp_idx}.proj{proj_idx}"
+            lines.append(f"    [{proj_id}] {block.project} ({block.period})")
+            for bullet_idx, bullet in enumerate(block.bullets):
+                bid = f"exp{exp_idx}.proj{proj_idx}.bullet{bullet_idx}"
+                lines.append(f"      [{bid}] {bullet}")
+    lines.append("")
+    lines.append("Education:")
+    for edu in base_resume.education:
+        lines.append(f"  {edu.degree}, {edu.institution} ({edu.period})")
+    return "\n".join(lines)
+
+
+def _word_overlap(original: str, edited: str) -> float:
+    orig_tokens = set(original.lower().split())
+    if not orig_tokens:
+        return 1.0
+    new_tokens = set(edited.lower().split())
+    return len(orig_tokens & new_tokens) / len(orig_tokens)
+
+
+TRIVIAL_BUZZWORDS = {
+    "agile",
+    "best-in-class",
+    "cloud-native",
+    "cutting-edge",
+    "distributed",
+    "enterprise-grade",
+    "high-performance",
+    "innovative",
+    "modern",
+    "robust",
+    "scalable",
+    "seamless",
+    "synergistic",
+    "restful",
+}
+
+
+def _is_trivial_buzzword_insertion(original: str, edited: str) -> bool:
+    original_words = set(str(original or "").lower().split())
+    edited_words = set(str(edited or "").lower().split())
+    added_words = edited_words - original_words
+    removed_words = original_words - edited_words
+    return (
+        not removed_words
+        and 1 <= len(added_words) <= 3
+        and added_words.issubset(TRIVIAL_BUZZWORDS)
+    )
+
+
+ALLOWED_V2_TARGET_TITLES = {
+    "Full Stack Engineer",
+    "Full Stack Developer",
+    "Backend Engineer",
+    "Backend Developer",
+    "Java Developer",
+    "Software Engineer",
+    "Software Developer",
+    "Frontend Developer",
+    "React Developer",
+    "AI Engineer",
+    "AI Developer",
+}
+
+
+def normalize_target_title(job_title: Any, job_description: Any = "") -> str:
+    """
+    Normalize noisy job-board titles into short, truthful ResumeV2 target titles.
+    Falls back to Full Stack Engineer when the mapping is unclear or unrelated.
+    """
+    raw_title = str(job_title or "").strip()
+    title = raw_title.lower()
+    description = str(job_description or "").lower()
+    software_context = bool(
+        re.search(
+            r"\b(api|backend|front[- ]?end|full[- ]?stack|software|developer|engineer|"
+            r"java|spring|react|node|graphql|microservice|database|web|application|integration)\b",
+            f"{title} {description}",
+        )
+    )
+
+    if not title:
+        return "Full Stack Engineer"
+    if re.search(r"\b(full\s*stack|full-stack|fullstack)\b", title):
+        return "Full Stack Developer" if "developer" in title else "Full Stack Engineer"
+    if re.search(r"\bsoftware\s+engineer\b", title):
+        return "Software Engineer"
+    if re.search(r"\bsoftware\s+developer\b", title):
+        return "Software Developer"
+    if re.search(r"\b(backend|back-end|back end)\b", title):
+        return "Backend Developer" if "developer" in title or "programmer" in title else "Backend Engineer"
+    if re.search(r"\b(frontend|front-end|front end)\b", title):
+        return "Frontend Developer"
+    if re.search(r"\breact\b", title) and re.search(r"\b(developer|engineer|programmer)\b", title):
+        return "React Developer"
+    if re.search(r"\bjava\b", title) and re.search(r"\b(developer|engineer|programmer)\b", title):
+        return "Java Developer"
+    if re.search(r"\b(ai|artificial intelligence|machine learning|ml)\b", title) and software_context:
+        if "developer" in title:
+            return "AI Developer"
+        if "engineer" in title:
+            return "AI Engineer"
+
+    return "Full Stack Engineer"
+
+
+def _replace_summary_title_prefix(summary: str, target_title: str) -> str:
+    allowed_title_pattern = (
+        r"full[- ]stack engineer|full[- ]stack developer|software engineer|software developer|"
+        r"backend engineer|backend developer|java developer|frontend developer|react developer|"
+        r"ai engineer|ai developer"
+    )
+    return re.sub(
+        rf"^\s*(?:{allowed_title_pattern})\b",
+        target_title,
+        str(summary or "").strip(),
+        count=1,
+        flags=re.IGNORECASE,
+    )
+
+
+def _split_first_sentence(text: str) -> tuple[str, str]:
+    match = re.match(r"^(.+?[.!?])(\s+.*)?$", str(text or "").strip(), flags=re.DOTALL)
+    if not match:
+        return str(text or "").strip(), ""
+    return match.group(1).strip(), str(match.group(2) or "").strip()
+
+
+def _is_repetitive_summary_focus(text: str) -> bool:
+    normalized = re.sub(r"[\s,;:.-]+", " ", str(text or "").lower()).strip()
+    if not normalized:
+        return True
+    redundant_patterns = (
+        r"^(?:and\s+)?a\s+strong\s+focus\s+on\s+(?:backend|frontend|front end|full stack|java|react|ai)\s+(?:development|engineering)?$",
+        r"^(?:and\s+)?with\s+a\s+strong\s+(?:backend|frontend|front end|full stack|java|react|ai)\s+focus$",
+        r"^(?:and\s+)?speciali[sz]ing\s+in\s+(?:backend|frontend|front end|full stack|java|react|ai)\s+(?:development|engineering)?$",
+        r"^(?:and\s+)?focused\s+on\s+(?:backend|frontend|front end|full stack|java|react|ai)\s+(?:development|engineering)?$",
+        r"^(?:and\s+)?(?:backend|frontend|front end|full stack|java|react|ai)\s+focused$",
+    )
+    return any(re.fullmatch(pattern, normalized, flags=re.IGNORECASE) for pattern in redundant_patterns)
+
+
+def _summary_tail_to_sentence(tail: str) -> str:
+    cleaned = re.sub(r"^[\s,;:-]+", "", str(tail or "").strip())
+    cleaned = re.sub(r"^(?:and|with)\s+", "", cleaned, flags=re.IGNORECASE).strip()
+    if not cleaned or _is_repetitive_summary_focus(cleaned):
+        return ""
+
+    if re.match(r"^(across|in|on|through|working across)\b", cleaned, flags=re.IGNORECASE):
+        sentence = f"Experience spans {cleaned}."
+    else:
+        sentence = cleaned[0].upper() + cleaned[1:]
+        if not sentence.endswith((".", "!", "?")):
+            sentence += "."
+    return sentence
+
+
+def _clean_v2_summary_first_sentence(summary: str, target_title: str) -> str:
+    """
+    Keep the first V2 summary sentence clean for any normalized target title.
+    Later sentences keep the useful experience context.
+    """
+    clean_target_title = target_title if target_title in ALLOWED_V2_TARGET_TITLES else "Full Stack Engineer"
+    text = _paragraphize_summary(summary)
+    if not text:
+        return ""
+
+    text = _replace_summary_title_prefix(text, clean_target_title)
+    first_sentence, rest = _split_first_sentence(text)
+    escaped_title = re.escape(clean_target_title)
+    opening_pattern = (
+        rf"^\s*{escaped_title}\s+with\s+2\s+years\s+of\s+production\s+experience\b(?P<tail>.*)$"
+    )
+    opening_match = re.match(opening_pattern, first_sentence.rstrip(".!?"), flags=re.IGNORECASE)
+    if not opening_match:
+        return text
+
+    clean_first_sentence = f"{clean_target_title} with 2 years of production experience."
+    tail_sentence = _summary_tail_to_sentence(opening_match.group("tail"))
+    pieces = [clean_first_sentence]
+    if tail_sentence:
+        pieces.append(tail_sentence)
+    if rest:
+        pieces.append(rest)
+    return " ".join(piece for piece in pieces if piece).strip()
+
+
+def _protect_v2_summary_opening(
+    base_summary: str,
+    candidate_summary: str,
+    target_title: str = "Full Stack Engineer",
+) -> str:
+    """
+    Keep V2 summaries broad unless the user explicitly chooses a narrower base.
+    This only fixes the opening phrase; it does not rewrite experience content.
+    """
+    summary = str(candidate_summary or "").strip()
+    if not summary:
+        return str(base_summary or "").strip()
+
+    clean_target_title = target_title if target_title in ALLOWED_V2_TARGET_TITLES else "Full Stack Engineer"
+    clean_opening = f"{clean_target_title} with 2 years of production experience."
+
+    replacements = (
+        (r"^\s*software engineer with 2 years of production experience\b", f"{clean_target_title} with 2 years of production experience"),
+        (r"^\s*backend[- ]focused software engineer\b", clean_target_title),
+        (r"^\s*backend[- ]first software engineer\b", clean_target_title),
+        (r"^\s*backend[- ]focused full[- ]stack engineer\b", clean_target_title),
+    )
+    for pattern, replacement in replacements:
+        updated = re.sub(pattern, replacement, summary, count=1, flags=re.IGNORECASE)
+        if updated != summary:
+            summary = updated
+            break
+
+    retitled_summary = _replace_summary_title_prefix(summary, clean_target_title)
+    if retitled_summary != summary:
+        summary = retitled_summary
+
+    if re.match(r"^\s*backend[- ]focused\b", summary, flags=re.IGNORECASE):
+        _, rest = _split_first_sentence(summary)
+        summary = " ".join(part for part in [clean_opening, rest] if part).strip()
+
+    first_sentence_match = re.match(r"^(.+?[.!?])(\s+.*)?$", summary, flags=re.DOTALL)
+    first_sentence = first_sentence_match.group(1) if first_sentence_match else summary
+    if re.search(
+        r"\b(speciali[sz]ing in backend development|backend[- ]focused|backend[- ]first)\b",
+        first_sentence,
+        flags=re.IGNORECASE,
+    ):
+        tail = first_sentence_match.group(2).strip() if first_sentence_match and first_sentence_match.group(2) else ""
+        summary = f"{clean_opening} {tail}".strip()
+
+    return _clean_v2_summary_first_sentence(summary, clean_target_title)
+
+
+def _select_v2_header_title(job_details: Dict[str, Any], base_resume: ResumeV2) -> str:
+    """
+    ResumeV2 defaults to the candidate's broad title. Narrow it only when the
+    job title itself clearly asks for a different role family.
+    """
+    return normalize_target_title(
+        job_details.get("job_title"),
+        job_details.get("description"),
+    )
+
+
+def _apply_v2_target_title(resume: ResumeV2, target_title: str) -> ResumeV2:
+    """
+    Apply one clean target title to the visible ResumeV2 title positions only.
+    Experience bullets/project content are intentionally untouched.
+    """
+    clean_target_title = target_title if target_title in ALLOWED_V2_TARGET_TITLES else "Full Stack Engineer"
+    updated_resume = resume.model_copy(deep=True)
+    updated_resume.title = clean_target_title
+    updated_resume.summary = _protect_v2_summary_opening(
+        base_summary=updated_resume.summary,
+        candidate_summary=updated_resume.summary,
+        target_title=clean_target_title,
+    )
+    target_experience = next(
+        (experience for experience in updated_resume.experience if str(experience.company or "").strip().lower() == "markitech ai"),
+        updated_resume.experience[0] if updated_resume.experience else None,
+    )
+    if target_experience is not None:
+        target_experience.title = clean_target_title
+    return updated_resume
+
+
+def apply_resume_patch(
+    base_resume: ResumeV2,
+    patch: ResumePatch,
+    *,
+    light_edit_word_overlap_floor: float = 0.7,
+) -> tuple[ResumeV2, list[ResumeV2ChangeLogItem], list[str]]:
+    """
+    Apply a ResumePatch to a deep copy of base_resume.
+    Returns (patched_resume, change_log, warnings).
+    Skipped operations emit warnings; never raises on bad patch data.
+    """
+    id_map = assign_resume_ids(base_resume)
+    resume = base_resume.model_copy(deep=True)
+    change_log: list[ResumeV2ChangeLogItem] = []
+    warnings: list[str] = []
+
+    # 1. Skill category reorders
+    for reorder in patch.skill_category_reorders:
+        cat = reorder.category
+        if cat not in resume.skills:
+            warnings.append(f"skill_category_reorder: unknown category '{cat}'")
+            continue
+        existing = [t.strip() for t in resume.skills[cat].split(",") if t.strip()]
+        new_order = [t.strip() for t in reorder.new_skill_order]
+        if sorted(t.lower() for t in existing) != sorted(t.lower() for t in new_order):
+            warnings.append(f"skill_category_reorder: '{cat}' not a permutation of existing tokens")
+            continue
+        resume.skills[cat] = ", ".join(new_order)
+        change_log.append(ResumeV2ChangeLogItem(type="skill_reorder", reason=f"Reordered skills in '{cat}'"))
+
+    # 2. Keep project blocks in base order. The base order is reverse chronological;
+    # moving TELUS above newer CliniScripts work confused the timeline in recruiter scans.
+    if patch.experience_project_reorders:
+        warnings.append("experience_project_reorder: ignored; ResumeV2 keeps project blocks in base reverse-chronological order")
+
+    # 3. Keep bullets in base order. The base order reads like the candidate's
+    # story; reordering made the generated resume feel less manually written.
+    if patch.project_bullet_reorders:
+        warnings.append("project_bullet_reorder: ignored; ResumeV2 keeps bullets in base order")
+
+    # 4. Preserve bullets for now. The user is comfortable with 1.5-2 pages, and
+    # dropping evidence like the OpenAI clinical-summary bullet is more harmful than useful.
+    if patch.bullet_drops:
+        warnings.append("bullet_drop: ignored; ResumeV2 currently preserves base bullets for evidence coverage")
+
+    # 5. Preserve approved experience bullets exactly. Title/summary formatting work
+    # must not trigger edits to finalized role-description content.
+    if patch.bullet_edits:
+        warnings.append("bullet_edit: ignored; ResumeV2 preserves approved base bullets exactly")
+
+    # 6. Summary rewrite (word-overlap floor enforced)
+    if patch.summary_rewrite is not None:
+        overlap = _word_overlap(base_resume.summary, patch.summary_rewrite)
+        if overlap < light_edit_word_overlap_floor:
+            warnings.append(f"summary_rewrite: rejected — word-overlap {overlap:.2f} < {light_edit_word_overlap_floor}")
+        else:
+            old_summary = resume.summary
+            resume.summary = patch.summary_rewrite
+            change_log.append(ResumeV2ChangeLogItem(type="summary_edit", before=old_summary, after=resume.summary, reason="summary rebalanced toward target role"))
+
+    # Final invariant assertions
+    for field in ("name", "email", "phone", "location"):
+        if getattr(base_resume, field) != getattr(resume, field):
+            raise ValueError(f"apply_resume_patch: identity field '{field}' was changed")
+    if len(resume.experience) != len(base_resume.experience):
+        raise ValueError("apply_resume_patch: experience count changed")
+    for ei, exp in enumerate(resume.experience):
+        if not exp.project_blocks:
+            raise ValueError(f"apply_resume_patch: experience[{ei}] has no project blocks")
+        for pi, block in enumerate(exp.project_blocks):
+            if not block.bullets:
+                raise ValueError(f"apply_resume_patch: exp[{ei}].proj[{pi}] has no bullets after patch")
+
+    return resume, change_log, warnings
+
+
+_RESUME_V2_PATCH_SYSTEM_PROMPT = """You are editing a real resume on behalf of a working software engineer. The base resume already exists and is the source of truth — you are not writing a new resume.
+
+Your job is to return a small set of edit decisions (a patch) that align the base resume more closely with the target job. Python will apply your patch to a verbatim copy of the base resume. You cannot output identity fields, dates, company names, project names, education, or metrics — Python copies those directly.
+
+You can do these things, and only these things:
+- Decide the target role family ("backend", "full_stack", "ai_backend", "general_software").
+- Optionally rewrite the summary. If you do, keep at least 70% of the original words. Light rebalancing only. Start broad as Full Stack Engineer or Software Engineer; do not start with "Backend-focused" unless the job title is explicitly backend-only.
+- Reorder skills inside a skill category (no additions, no removals).
+- Keep project blocks in their original base order. Do not reorder projects; the base order is reverse chronological.
+- Keep bullets inside each project block in their original base order.
+- Do not edit experience bullets. The approved bullet wording is final unless the user explicitly asks for bullet rewriting in a future task.
+- Keep bullets by default. The user is comfortable with 1.5-2 pages, so do not drop bullets for length.
+
+The single biggest failure mode of this prompt is inserting unsupported architecture adjectives and corporate-resume filler into the candidate's bullets to match job-posting language. Avoid this absolutely. The candidate's voice is plain, specific, and concrete. Job postings are not. Do not let job-posting language bleed into the resume.
+
+Concrete examples of forbidden edits (this list is illustrative, not exhaustive):
+- Forbidden: changing "Java/Spring Boot microservices" to "scalable Java/Spring Boot microservices".
+- Forbidden: changing "email-template API" to "RESTful email-template API".
+- Forbidden: changing "ordering and retry logic" to "fault-tolerant ordering and retry logic".
+- Forbidden: changing "backend steps" to "optimized backend steps".
+- Forbidden: changing "Go + GraphQL resolvers" to "high-performance Go + GraphQL resolvers".
+- Forbidden: adding "robust", "scalable", "distributed", "cloud-native", "enterprise-grade", "fault-tolerant", "high-performance", "RESTful", "optimized", "modern", "real-time", "production-grade", "mission-critical", "highly available", "secure" (when not already there), "resilient", "containerized", "cross-functional", or similar adjectives to a bullet to match a job keyword.
+
+The rule behind the examples: do not insert any qualifier, adjective, or descriptor into an existing bullet unless that exact quality is already evidenced elsewhere in the same bullet's facts. If the original bullet does not already establish that something was scalable/fault-tolerant/distributed/etc., do not add the word — the addition is a claim, not a wording change, and claims must come from the candidate.
+
+If you find yourself wanting to add a single descriptive word to make a bullet match a job posting, choose "keep" instead. Single-word adjective insertions to align with job-posting vocabulary are the most common form of unsupported-claim drift and will be rejected.
+
+Do NOT do these things:
+- Do not invent bullets.
+- Do not invent or change IDs. Every bullet_id and experience_id must match one Python gave you in the base resume.
+- Do not rewrite bullets. Python will ignore bullet edits and keep the original approved wording.
+- Do not add keywords that aren't supported by the candidate's real experience.
+- Do not reorder bullets just to surface a job keyword earlier. The author ordered them for narrative reasons.
+- Do not insert architecture adjectives, quality adjectives, or job-posting buzzwords into bullets to match the job description. See examples above.
+- Do not add generic resume language, polished corporate filler, or hype words anywhere in the resume, including the summary.
+- Do not let the summary drift toward generic phrasing such as "results-driven", "passionate", "proven track record", "highly skilled", "dynamic", or similar.
+
+Bullet IDs are formatted as expN.projM.bulletK and appear in square brackets before each bullet in the base resume you're shown. Reference them exactly as shown.
+
+Return only JSON matching the ResumePatch schema. If you're unsure, do less — keep the approved bullets unchanged and fall back to skill-category reordering."""
+
+
+async def generate_resume_patch_with_llm(
+    job_details: dict,
+    base_resume: ResumeV2,
+    *,
+    resume_mode: str = RESUME_MODE_BALANCED,
+) -> ResumePatch:
+    job_id = job_details.get("job_id")
+    _log_v2_llm_provider(job_id)
+    serialized_job = _serialize_v2_job_for_prompt(job_details)
+    id_annotated_base_resume = _build_id_annotated_resume(base_resume)
+
+    prompt = f"""Target job:
+\"\"\"
+{serialized_job}
+\"\"\"
+
+Base resume (with bullet IDs in [brackets]):
+\"\"\"
+{id_annotated_base_resume}
+\"\"\"
+
+Resume length mode: {resume_mode}
+
+Decide:
+1. What role family this job fits best.
+2. Whether the summary needs a light rebalance. If yes, write one that keeps 70%+ of the original words and does not add job-posting adjectives the original summary doesn't already have. Start broad as Full Stack Engineer or Software Engineer, then mention backend strength naturally.
+3. Whether any skills need to be reordered within their categories to bring job-relevant ones forward. Reordering skills is the safest way to align with a job — prefer it over bullet edits.
+4. Keep project blocks in the exact base order. Do not move TELUS ahead of newer CliniScripts work just because the job is Java-heavy.
+5. Keep bullets in the exact base order inside each project block.
+6. Do not propose bullet edits. The approved experience bullets are final and should be preserved exactly.
+7. Do not drop bullets for length in this flow. Prefer a truthful 1.5-2 page resume over removing useful evidence.
+
+Self-check before returning the patch: bullet_edits and bullet_drops should be empty unless the user explicitly asks for bullet rewriting in a future task.
+
+The candidate's voice is plain, specific, and concrete. Job postings use buzzwords; the candidate does not. Preserve the gap. Do not narrow it.
+
+Return only the ResumePatch JSON."""
+
+    logging.info(
+        "ResumeV2 patch call settings: model=%s, temperature=%s, maxOutputTokens=%s",
+        str(getattr(config, "LLM_MODEL", "unknown")),
+        RESUME_V2_PATCH_TEMPERATURE,
+        RESUME_V2_PATCH_MAX_OUTPUT_TOKENS,
+    )
+    llm_output = _generate_structured_output(
+        prompt=prompt,
+        system_prompt=_RESUME_V2_PATCH_SYSTEM_PROMPT,
+        response_model=ResumePatch,
+        temperature=RESUME_V2_PATCH_TEMPERATURE,
+        max_tokens=RESUME_V2_PATCH_MAX_OUTPUT_TOKENS,
+        use_direct_gemini=True,
+    )
+
+    # Validate all IDs in the patch against the base resume; drop unknown ones with warnings
+    id_map = assign_resume_ids(base_resume)
+    id_warnings: list[str] = []
+
+    valid_bullet_edits = []
+    for edit in llm_output.bullet_edits:
+        if edit.bullet_id not in id_map:
+            id_warnings.append(f"generate_patch: unknown bullet_id in bullet_edits '{edit.bullet_id}' — dropped")
+        else:
+            valid_bullet_edits.append(edit)
+    llm_output.bullet_edits = valid_bullet_edits
+
+    valid_bullet_drops = []
+    for drop in llm_output.bullet_drops:
+        if drop.bullet_id not in id_map:
+            id_warnings.append(f"generate_patch: unknown bullet_id in bullet_drops '{drop.bullet_id}' — dropped")
+        else:
+            valid_bullet_drops.append(drop)
+    llm_output.bullet_drops = valid_bullet_drops
+
+    valid_proj_reorders = []
+    for reorder in llm_output.project_bullet_reorders:
+        unknown = [bid for bid in reorder.new_bullet_order if bid not in id_map]
+        if unknown:
+            id_warnings.append(f"generate_patch: unknown bullet IDs in project_bullet_reorders {unknown} — dropped")
+        else:
+            valid_proj_reorders.append(reorder)
+    llm_output.project_bullet_reorders = valid_proj_reorders
+
+    valid_exp_reorders = []
+    for reorder in llm_output.experience_project_reorders:
+        if reorder.experience_id not in id_map:
+            id_warnings.append(f"generate_patch: unknown experience_id '{reorder.experience_id}' — dropped")
+        else:
+            valid_exp_reorders.append(reorder)
+    llm_output.experience_project_reorders = valid_exp_reorders
+
+    if id_warnings:
+        llm_output.warnings = list(llm_output.warnings or []) + id_warnings
+        logging.warning("ResumeV2 patch ID validation for job_id %s: %s", job_id, id_warnings)
+
+    return llm_output
+
+
+def validate_v2_patched_resume(
+    base_resume: ResumeV2,
+    patched_resume: ResumeV2,
+    patch: ResumePatch,
+    change_log: list[ResumeV2ChangeLogItem],
+) -> None:
+    """Raise ValueError if post-patch invariants are violated."""
+    issues: list[str] = []
+
+    for field in ("name", "email", "phone", "location"):
+        if getattr(base_resume, field) != getattr(patched_resume, field):
+            issues.append(f"identity field '{field}' changed")
+
+    if len(patched_resume.experience) != len(base_resume.experience):
+        issues.append(f"experience count changed: {len(base_resume.experience)} → {len(patched_resume.experience)}")
+
+    for ei, (base_exp, patched_exp) in enumerate(zip(base_resume.experience, patched_resume.experience)):
+        if base_exp.company != patched_exp.company:
+            issues.append(f"exp[{ei}] company changed")
+        if base_exp.start_date != patched_exp.start_date or base_exp.end_date != patched_exp.end_date:
+            issues.append(f"exp[{ei}] dates changed")
+        if not patched_exp.project_blocks:
+            issues.append(f"exp[{ei}] has no project blocks")
+            continue
+        base_proj_names = {b.project for b in base_exp.project_blocks}
+        patched_proj_names = {b.project for b in patched_exp.project_blocks}
+        if base_proj_names != patched_proj_names:
+            issues.append(f"exp[{ei}] project block names changed: {base_proj_names} → {patched_proj_names}")
+        for block in patched_exp.project_blocks:
+            if not block.bullets:
+                issues.append(f"exp[{ei}] project '{block.project}' has no bullets")
+
+    base_edu = [(e.degree, e.institution, e.period) for e in base_resume.education]
+    patched_edu = [(e.degree, e.institution, e.period) for e in patched_resume.education]
+    if base_edu != patched_edu:
+        issues.append("education changed")
+
+    if hasattr(patched_resume, "projects") and getattr(patched_resume, "projects", None):
+        issues.append("patched resume has a separate projects section")
+
+    if issues:
+        raise ValueError("validate_v2_patched_resume failed: " + "; ".join(issues))
+
+
+def _load_base_resume_details() -> ResumeLike | None:
     """
     Load the base resume for generation.
-    Local resume.json is the primary source of truth so it can be edited manually.
+    The configured local base resume file is the primary source of truth so it can be edited manually.
     Supabase is only used as a fallback when the local file is missing.
     """
     resume_path = getattr(config, "BASE_RESUME_PATH", "resume.json")
@@ -400,10 +1134,17 @@ def _load_base_resume_details() -> Resume | None:
         return None
 
     try:
-        for key in ["skills", "experience", "education", "projects", "certifications", "languages"]:
-            if raw_resume_details.get(key) is None:
-                raw_resume_details[key] = []
-        return Resume(**raw_resume_details)
+        resume = parse_resume_data(raw_resume_details)
+        if not is_resume_v2_model(resume):
+            for key in ["skills", "experience", "education", "projects", "certifications", "languages"]:
+                if raw_resume_details.get(key) is None:
+                    raw_resume_details[key] = []
+            resume = parse_resume_data(raw_resume_details)
+        logging.info(
+            "Successfully parsed base resume as %s.",
+            "ResumeV2" if is_resume_v2_model(resume) else "legacy Resume",
+        )
+        return resume
     except Exception as e:
         logging.error(f"Error parsing base resume details into Pydantic model: {e}")
         logging.error(f"Raw base resume data: {raw_resume_details}")
@@ -411,10 +1152,10 @@ def _load_base_resume_details() -> Resume | None:
 
 
 def _apply_job_contact_overrides(
-    resume: Resume,
+    resume: ResumeLike,
     job_details: Dict[str, Any],
     email_override: str | None = None,
-) -> Resume:
+) -> ResumeLike:
     """
     Apply per-job contact overrides without changing the source-of-truth resume.json.
     """
@@ -439,12 +1180,20 @@ def _paragraphize_summary(text: str) -> str:
     return " ".join(parts) if parts else str(text).strip()
 
 
-def _normalize_skills_output(base_skills: list[str], rewritten_skills: list[str]) -> list[str]:
+def _normalize_skills_output(base_skills: Any, rewritten_skills: list[str]) -> list[str]:
     """
     Prefer grouped skill lines when the base resume already uses grouped categories.
     Keep the model's selected skills when possible instead of snapping back to the full base list.
     """
-    cleaned_base = [skill for skill in (base_skills or []) if str(skill).strip()]
+    if isinstance(base_skills, dict):
+        base_skill_items = [
+            f"{category}: {values}"
+            for category, values in base_skills.items()
+            if str(category).strip() and str(values).strip()
+        ]
+    else:
+        base_skill_items = base_skills or []
+    cleaned_base = [skill for skill in base_skill_items if str(skill).strip()]
     cleaned_rewritten = [skill for skill in (rewritten_skills or []) if str(skill).strip()]
 
     base_is_grouped = any(":" in str(skill) for skill in cleaned_base)
@@ -543,20 +1292,40 @@ def _split_bullet_ready_lines(text: Any) -> list[str]:
     return sentence_lines or ([compact] if compact else [])
 
 
+def _normalize_v2_bullet_text(text: Any) -> str:
+    cleaned_text = _coerce_description_text(text)
+    if not cleaned_text:
+        return ""
+    normalized = cleaned_text.replace("\r\n", "\n").replace("\r", "\n").strip()
+    normalized = re.sub(r"(?m)^\s*(?:[-*•·●▪◦]|\d+[.)])\s+", "", normalized)
+    return re.sub(r"\s+", " ", normalized).strip()
+
+
 def _normalize_bullet_description(text: Any) -> str:
     return "\n".join(_split_bullet_ready_lines(text)).strip()
 
 
 def _normalize_personalized_resume_output(
-    base_resume: Resume,
-    personalized_resume: Resume,
-) -> Resume:
+    base_resume: ResumeLike,
+    personalized_resume: ResumeLike,
+) -> ResumeLike:
     """
     Enforce the final output shape even if the model drifts from formatting
     instructions, without manually clipping bullet counts.
     """
     normalized_resume = personalized_resume.model_copy(deep=True)
     normalized_resume.summary = _paragraphize_summary(normalized_resume.summary)
+
+    if is_resume_v2_model(normalized_resume):
+        for experience in normalized_resume.experience:
+            for block in experience.project_blocks:
+                block.bullets = [
+                    cleaned_bullet
+                    for bullet in block.bullets
+                    if (cleaned_bullet := _normalize_v2_bullet_text(bullet))
+                ]
+        return normalized_resume
+
     normalized_resume.skills = _normalize_skills_output(
         base_resume.skills,
         normalized_resume.skills,
@@ -569,11 +1338,14 @@ def _normalize_personalized_resume_output(
     return normalized_resume
 
 
-def _apply_resume_mode_constraints(resume: Resume, resume_mode: str) -> Resume:
+def _apply_resume_mode_constraints(resume: ResumeLike, resume_mode: str) -> ResumeLike:
     """
     Enforce section-level choices that should not depend on model obedience.
     """
     constrained_resume = resume.model_copy(deep=True)
+    if is_resume_v2_model(constrained_resume):
+        return constrained_resume
+
     if _normalize_resume_mode(resume_mode) == RESUME_MODE_ONE_PAGE:
         constrained_resume.projects = []
         constrained_resume.skills = constrained_resume.skills[:8]
@@ -622,11 +1394,42 @@ def _compact_description(text: str, max_bullets: int, max_words_per_bullet: int)
     return "\n".join(compact_lines)
 
 
-def _compact_resume_for_one_page_attempt(resume: Resume, attempt: int) -> Resume:
+def _compact_resume_v2_for_one_page_attempt(resume: ResumeLike, attempt: int) -> ResumeLike:
+    compact_resume = resume.model_copy(deep=True)
+    strategies = [
+        {"skills": 8, "bullets_per_block": 6, "bullet_words": 32, "summary_sentences": 5, "summary_words": 84},
+        {"skills": 8, "bullets_per_block": 5, "bullet_words": 28, "summary_sentences": 4, "summary_words": 72},
+        {"skills": 7, "bullets_per_block": 4, "bullet_words": 26, "summary_sentences": 4, "summary_words": 64},
+        {"skills": 7, "bullets_per_block": 4, "bullet_words": 22, "summary_sentences": 3, "summary_words": 56},
+        {"skills": 6, "bullets_per_block": 3, "bullet_words": 22, "summary_sentences": 3, "summary_words": 50},
+        {"skills": 6, "bullets_per_block": 3, "bullet_words": 20, "summary_sentences": 2, "summary_words": 44},
+    ]
+    strategy = strategies[min(attempt, len(strategies) - 1)]
+
+    compact_resume.summary = _compact_summary(
+        compact_resume.summary,
+        max_sentences=strategy["summary_sentences"],
+        max_words=strategy["summary_words"],
+    )
+    compact_resume.skills = dict(list(compact_resume.skills.items())[: strategy["skills"]])
+    for experience in compact_resume.experience:
+        for block in experience.project_blocks:
+            block.bullets = [
+                _truncate_words(str(bullet), strategy["bullet_words"])
+                for bullet in block.bullets[: strategy["bullets_per_block"]]
+                if str(bullet).strip()
+            ]
+    return compact_resume
+
+
+def _compact_resume_for_one_page_attempt(resume: ResumeLike, attempt: int) -> ResumeLike:
     """
     Apply progressively stricter one-page constraints. This protects the product
     promise even when an LLM returns content that is longer than requested.
     """
+    if is_resume_v2_model(resume):
+        return _compact_resume_v2_for_one_page_attempt(resume, attempt)
+
     compact_resume = resume.model_copy(deep=True)
     compact_resume.projects = []
 
@@ -693,15 +1496,22 @@ def _fallback_projects_for_project_mode(
 
 
 def create_resume_pdf_for_mode(
-    resume_data: Resume,
+    resume_data: ResumeLike,
     header_title: str | None = None,
-    resume_mode: str = RESUME_MODE_ONE_PAGE,
-) -> tuple[Resume, bytes]:
+    resume_mode: str = RESUME_MODE_BALANCED,
+) -> tuple[ResumeLike, bytes]:
     """
-    Render a resume PDF and enforce the one-page product promise in one_page mode.
+    Render a resume PDF. Balanced mode does not force page count; the old
+    one_page alias is retained only for backward-compatible legacy commands.
     """
     selected_resume_mode = _normalize_resume_mode(resume_mode)
     normalized_resume = _apply_resume_mode_constraints(resume_data, selected_resume_mode)
+
+    if is_resume_v2_model(normalized_resume):
+        return normalized_resume, pdf_generator.create_resume_pdf(
+            normalized_resume,
+            header_title=header_title,
+        )
 
     if selected_resume_mode != RESUME_MODE_ONE_PAGE:
         return normalized_resume, pdf_generator.create_resume_pdf(
@@ -788,6 +1598,80 @@ async def generate_keyword_plan_with_llm(
     )
     _log_keyword_plan_response(job_id=job_details.get("job_id"), llm_output=llm_output.model_dump_json())
     return _postprocess_keyword_plan(llm_output)
+
+
+
+
+def _normalize_for_validation(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip()).lower()
+
+
+def _validation_similarity(left: str, right: str) -> float:
+    left_norm = _normalize_for_validation(left)
+    right_norm = _normalize_for_validation(right)
+    if not left_norm or not right_norm:
+        return 0.0
+    return SequenceMatcher(None, left_norm, right_norm).ratio()
+
+
+
+async def personalize_resume_v2_with_controlled_tailoring(
+    job_details: Dict[str, Any],
+    base_resume: ResumeV2,
+    resume_mode: str = RESUME_MODE_BALANCED,
+) -> tuple[ResumeV2, str]:
+    job_id = job_details.get("job_id")
+    selected_resume_mode = _normalize_resume_mode(resume_mode)
+    target_title = _select_v2_header_title(job_details, base_resume)
+    logging.info("Generating ResumeV2 patch for job_id: %s", job_id)
+
+    patch = await generate_resume_patch_with_llm(
+        job_details=job_details,
+        base_resume=base_resume,
+        resume_mode=selected_resume_mode,
+    )
+
+    patched_resume, change_log, patch_warnings = apply_resume_patch(base_resume, patch)
+    guarded_summary = _protect_v2_summary_opening(
+        base_summary=base_resume.summary,
+        candidate_summary=patched_resume.summary,
+        target_title=target_title,
+    )
+    if guarded_summary != patched_resume.summary:
+        logging.warning(
+            "ResumeV2 summary opening adjusted for job_id %s to avoid an overly narrow backend-only framing.",
+            job_id,
+        )
+        patched_resume.summary = guarded_summary
+
+    if patch_warnings:
+        logging.warning("ResumeV2 patch warnings for job_id %s: %s", job_id, patch_warnings)
+
+    try:
+        validate_v2_patched_resume(base_resume, patched_resume, patch, change_log)
+    except ValueError as exc:
+        logging.error(
+            "ResumeV2 patch validation failed for job_id %s: %s. Falling back to base resume.",
+            job_id,
+            exc,
+        )
+        patched_resume = base_resume.model_copy(deep=True)
+        change_log = [ResumeV2ChangeLogItem(type="fallback", reason=str(exc))]
+
+    patched_resume = _normalize_personalized_resume_output(
+        base_resume=base_resume,
+        personalized_resume=patched_resume,
+    )
+    patched_resume = _apply_v2_target_title(patched_resume, target_title)
+
+    logging.info(
+        "ResumeV2 patch applied for job_id %s: %s changes, %s warnings",
+        job_id,
+        len(change_log),
+        len(patch_warnings),
+    )
+
+    return patched_resume, target_title
 
 
 def _apply_two_step_rewrite_to_resume(
@@ -962,7 +1846,7 @@ async def rewrite_resume_with_keyword_plan(
     full_resume: Resume,
     job_details: Dict[str, Any],
     keyword_plan: ATSKeywordPlan,
-    resume_mode: str = RESUME_MODE_ONE_PAGE,
+    resume_mode: str = RESUME_MODE_BALANCED,
 ) -> ATSResumeRewriteOutput:
     """
     Second step of the new AI flow: rewrite the resume using the AI-produced keyword plan.
@@ -1209,7 +2093,7 @@ async def rewrite_resume_with_keyword_plan(
 async def personalize_resume_with_two_step_ai(
     base_resume_details: Resume,
     job_details: Dict[str, Any],
-    resume_mode: str = RESUME_MODE_ONE_PAGE,
+    resume_mode: str = RESUME_MODE_BALANCED,
 ) -> tuple[Resume, str]:
     """
     Two-step AI-only resume generation flow:
@@ -1595,18 +2479,18 @@ def validate_customization(
 # --- Main Processing Logic ---
 async def process_job(
     job_details: Dict[str, Any],
-    base_resume_details: Resume,
+    base_resume_details: ResumeLike,
     generation_flow: str = "legacy",
     email_override: str | None = None,
-    resume_mode: str = RESUME_MODE_ONE_PAGE,
-):
+    resume_mode: str = RESUME_MODE_BALANCED,
+) -> bool:
     """
     Processes a single job: personalizes resume, generates PDF, uploads, updates status.
     """
     job_id = job_details.get("job_id")
     if not job_id:
         logging.error("Job details missing job_id.")
-        return
+        return False
 
     logging.info(f"--- Starting processing for job_id: {job_id} ---")
     selected_resume_mode = _normalize_resume_mode(resume_mode)
@@ -1615,11 +2499,24 @@ async def process_job(
         job_id,
         _resume_mode_label(selected_resume_mode),
     )
+    if is_resume_v2_model(base_resume_details) and generation_flow != "two_step_ai":
+        logging.error("ResumeV2 currently supports only the two_step_ai controlled tailoring flow.")
+        return False
 
     try:
         # 1. Personalize Resume Sections
         header_title = str(job_details.get("job_title") or "").strip()
-        if generation_flow == "two_step_ai":
+        if is_resume_v2_model(base_resume_details):
+            logging.info(
+                "Using ResumeV2 controlled tailoring flow for job_id: %s",
+                job_id,
+            )
+            personalized_resume_data, header_title = await personalize_resume_v2_with_controlled_tailoring(
+                job_details=job_details,
+                base_resume=base_resume_details,
+                resume_mode=selected_resume_mode,
+            )
+        elif generation_flow == "two_step_ai":
             logging.info(
                 f"Using two-step AI resume generation flow for job_id: {job_id}"
             )
@@ -1717,8 +2614,7 @@ async def process_job(
             logging.info(f"PDF generation complete for job_id: {job_id}")
         except Exception as e:
             logging.error(f"Failed to generate PDF for job_id {job_id}: {e}")
-            # Skip to the next job if PDF generation fails
-            return # Stop processing this job
+            return False
 
         # 3. Upload PDF to Supabase Storage
         destination_path = _build_resume_filename(
@@ -1730,8 +2626,7 @@ async def process_job(
 
         if not resume_path:
             logging.error(f"Failed to upload resume PDF for job_id: {job_id}")
-            # Skip updating the job record if upload fails
-            return # Stop processing this job
+            return False
 
         logging.info(f"Successfully uploaded PDF for job_id: {job_id}. Path: {resume_path}")
 
@@ -1742,6 +2637,9 @@ async def process_job(
             resume_path,
             header_title=header_title,
         )
+        if not customized_resume_id:
+            logging.error(f"Failed to save customized resume for job_id: {job_id}")
+            return False
 
 
         # 4. Update Job Record in Supabase
@@ -1753,12 +2651,14 @@ async def process_job(
             logging.info(f"Successfully updated job record for job_id: {job_id}")
         else:
             logging.error(f"Failed to update job record for job_id: {job_id}")
+            return False
 
         logging.info(f"--- Finished processing for job_id: {job_id} ---")
+        return True
 
     except Exception as e:
         logging.error(f"An unexpected error occurred while processing job_id {job_id}: {e}", exc_info=True)
-        # Log the error but continue to the next job
+        return False
 
 async def run_job_processing_cycle(
     limit_override: int | None = None,
@@ -1766,8 +2666,8 @@ async def run_job_processing_cycle(
     force_regenerate: bool = False,
     generation_flow: str | None = None,
     email_override: str | None = None,
-    resume_mode: str = RESUME_MODE_ONE_PAGE,
-):
+    resume_mode: str = RESUME_MODE_BALANCED,
+) -> bool:
     """
     Fetches top jobs and processes them one by one.
     """
@@ -1790,7 +2690,7 @@ async def run_job_processing_cycle(
     base_resume_details = _load_base_resume_details()
     if not base_resume_details:
         logging.error("Could not load valid base resume details. Aborting cycle.")
-        return
+        return False
 
     # 2. Fetch Top Jobs to Process
     jobs_limit = limit_override if limit_override is not None else config.JOBS_TO_CUSTOMIZE_PER_RUN
@@ -1807,7 +2707,7 @@ async def run_job_processing_cycle(
         job_record = supabase_utils.get_job_by_id(target_job_id)
         if not job_record:
             logging.error(f"Could not find job_id {target_job_id}.")
-            return
+            return False
 
         existing_resume_id = str(job_record.get("customized_resume_id") or "").strip()
         if existing_resume_id and not force_regenerate:
@@ -1815,7 +2715,7 @@ async def run_job_processing_cycle(
                 f"job_id {target_job_id} already has a generated resume ({existing_resume_id}). "
                 "Re-run with --force-regenerate to create a new one and relink the job."
             )
-            return
+            return True
 
         if existing_resume_id and force_regenerate:
             logging.info(
@@ -1823,7 +2723,7 @@ async def run_job_processing_cycle(
                 "A new customized resume will be created and linked to this job."
             )
 
-        await process_job(
+        success = await process_job(
             job_record,
             base_resume_details,
             selected_generation_flow,
@@ -1831,7 +2731,7 @@ async def run_job_processing_cycle(
             resume_mode=selected_resume_mode,
         )
         logging.info("Finished job processing cycle.")
-        return
+        return success
 
     manual_limit_mode = limit_override is not None
     min_score_for_custom = int(getattr(config, "MIN_SCORE_FOR_CUSTOM_RESUME", 50))
@@ -1898,7 +2798,7 @@ async def run_job_processing_cycle(
             )
         else:
             logging.info("No new jobs found to process in this cycle.")
-        return
+        return True
 
     if effective_min_score > 0:
         logging.info(
@@ -1908,16 +2808,20 @@ async def run_job_processing_cycle(
         logging.info(f"Found {len(jobs_to_process)} jobs to process.")
 
     # 3. Process each job sequentially to avoid overwhelming LLM/resources
+    all_successful = True
     for job_details in jobs_to_process:
-        await process_job(
+        job_successful = await process_job(
             job_details,
             base_resume_details,
             selected_generation_flow,
             email_override=email_override,
             resume_mode=selected_resume_mode,
         )
+        if not job_successful:
+            all_successful = False
 
     logging.info("Finished job processing cycle.")
+    return all_successful
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Generate customized resumes for top scored jobs.")
@@ -1946,9 +2850,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--resume-mode",
-        choices=[RESUME_MODE_ONE_PAGE, RESUME_MODE_PROJECTS],
-        default=RESUME_MODE_ONE_PAGE,
-        help="Choose resume output mode. Defaults to one_page; use project_mode to include Projects.",
+        default=RESUME_MODE_BALANCED,
+        help="Choose resume output mode. Defaults to balanced.",
     )
     return parser
 
@@ -1960,7 +2863,7 @@ if __name__ == "__main__":
         args = build_parser().parse_args()
         if args.limit is not None and args.limit <= 0:
             raise SystemExit("--limit must be a positive integer.")
-        asyncio.run(
+        success = asyncio.run(
             run_job_processing_cycle(
                 limit_override=args.limit,
                 target_job_id=args.job_id,
@@ -1970,6 +2873,12 @@ if __name__ == "__main__":
                 resume_mode=args.resume_mode,
             )
         )
-        logging.info("Rresume processing completed successfully.")
+        if not success:
+            logging.error("Resume processing failed.")
+            raise SystemExit(1)
+        logging.info("Resume processing completed successfully.")
+    except SystemExit:
+        raise
     except Exception as e:
         logging.error(f"Error during task execution: {e}", exc_info=True)
+        raise SystemExit(1)

@@ -16,7 +16,7 @@ SUPABASE_CUSTOMIZED_COVER_LETTERS_TABLE_NAME = "customized_cover_letters"
 SUPABASE_STORAGE_BUCKET="personalized_resumes"
 SUPABASE_RESUME_STORAGE_BUCKET="resumes"
 SUPABASE_BASE_RESUME_TABLE_NAME = "base_resume"
-BASE_RESUME_PATH = "resume.json"
+BASE_RESUME_PATH = os.environ.get("BASE_RESUME_PATH", "resume_new.json")
 
 # API keys — set only the key(s) needed for your chosen provider.
 LLM_API_KEY = os.environ.get("LLM_API_KEY") or os.environ.get("GEMINI_API_KEY") or os.environ.get("GEMINI_FIRST_API_KEY")

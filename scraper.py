@@ -5,6 +5,7 @@ import time
 import random 
 import logging
 import re
+from pathlib import Path
 from html import unescape
 from urllib.parse import urlencode, urlparse, urlunparse
 from pydantic import BaseModel, Field
@@ -2458,6 +2459,33 @@ def _log_source_pool(source_name: str, jobs: list[dict]) -> None:
         provider_counts[provider] = provider_counts.get(provider, 0) + 1
     logging.info("%s candidate pool size: %s | breakdown=%s", source_name.upper(), len(jobs), provider_counts)
 
+
+def _backup_shortlisted_jobs_on_save_failure(final_jobs: list[dict], saved_count: int) -> None:
+    if not final_jobs:
+        return
+
+    backup_dir = Path("backups") / "failed_upserts"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup_path = backup_dir / f"shortlisted_jobs_failed_upsert_{timestamp}.json"
+
+    payload = {
+        "created_at": datetime.now().isoformat(),
+        "total_shortlisted": len(final_jobs),
+        "total_saved_to_supabase": int(saved_count),
+        "total_not_saved": max(0, len(final_jobs) - int(saved_count)),
+        "jobs": final_jobs,
+    }
+
+    with backup_path.open("w", encoding="utf-8") as fh:
+        json.dump(payload, fh, indent=2, ensure_ascii=False)
+
+    logging.warning(
+        "Saved %s unsaved shortlisted jobs to local backup: %s",
+        payload["total_not_saved"],
+        backup_path,
+    )
+
 # --- Main Execution ---
 if __name__ == "__main__":
     total_new_jobs_saved = 0
@@ -2628,6 +2656,7 @@ if __name__ == "__main__":
                 total_new_jobs_saved,
                 len(final_jobs),
             )
+            _backup_shortlisted_jobs_on_save_failure(final_jobs, total_new_jobs_saved)
     else:
         logging.info("No final shortlisted jobs survived the multi-source filtering pipeline.")
 

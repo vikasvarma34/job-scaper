@@ -11,7 +11,7 @@ from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import inch
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
-from models import Resume
+from models import ResumeLike, is_resume_v2_model
 
 logging.basicConfig(level=logging.INFO)
 
@@ -160,24 +160,30 @@ def _append_left_right_line(
 
 def _append_skill_lines(
     target_story: list,
-    skills: list[str],
+    skills: object,
     style_skill_line: ParagraphStyle,
 ) -> None:
-    cleaned_skills = [_safe_text(skill) for skill in skills if _safe_text(skill)]
+    if isinstance(skills, dict):
+        skill_items = [
+            f"{_safe_text(str(label))}: {_safe_text(str(values))}"
+            for label, values in skills.items()
+            if _safe_text(str(label)) and _safe_text(str(values))
+        ]
+    else:
+        skill_items = list(skills or [])
+
+    cleaned_skills = [_safe_text(skill) for skill in skill_items if _safe_text(skill)]
     for skill in cleaned_skills:
         if ":" in skill:
             label, values = skill.split(":", 1)
             target_story.append(
-                Paragraph(
-                    f"<b>{escape(label.strip())}:</b> {escape(values.strip())}",
-                    style_skill_line,
-                )
+                Paragraph(f"<b>{escape(label.strip())}:</b> {escape(values.strip())}", style_skill_line)
             )
         else:
             target_story.append(Paragraph(escape(skill), style_skill_line))
 
 
-def create_resume_pdf(resume_data: Resume, header_title: str | None = None) -> bytes:
+def create_resume_pdf(resume_data: ResumeLike, header_title: str | None = None) -> bytes:
     """
     Generate a strict ATS-first, single-column, text-based PDF resume.
     """
@@ -266,11 +272,13 @@ def create_resume_pdf(resume_data: Resume, header_title: str | None = None) -> b
 
     story: list = []
     content_width = doc.width
+    is_v2_resume = is_resume_v2_model(resume_data)
 
     if _safe_text(resume_data.name):
         story.append(Paragraph(escape(_safe_text(resume_data.name).upper()), style_name))
-    if _safe_text(header_title):
-        story.append(Paragraph(escape(_safe_text(header_title)), style_header_title))
+    display_title = _safe_text(header_title) or _safe_text(getattr(resume_data, "title", ""))
+    if display_title:
+        story.append(Paragraph(escape(display_title), style_header_title))
 
     contact_parts = [
         _safe_text(resume_data.email),
@@ -296,17 +304,63 @@ def create_resume_pdf(resume_data: Resume, header_title: str | None = None) -> b
 
     summary_text = _safe_text(resume_data.summary)
     if summary_text:
-        _append_section_heading(story, "PROFESSIONAL SUMMARY", style_section_heading)
+        _append_section_heading(
+            story,
+            "SUMMARY" if is_v2_resume else "PROFESSIONAL SUMMARY",
+            style_section_heading,
+        )
         story.append(Paragraph(escape(summary_text), style_body))
 
-    cleaned_skills = [_safe_text(skill) for skill in resume_data.skills if _safe_text(skill)]
+    if isinstance(resume_data.skills, dict):
+        cleaned_skills = [
+            f"{_safe_text(str(label))}: {_safe_text(str(values))}"
+            for label, values in resume_data.skills.items()
+            if _safe_text(str(label)) and _safe_text(str(values))
+        ]
+    else:
+        cleaned_skills = [_safe_text(skill) for skill in resume_data.skills if _safe_text(skill)]
     if cleaned_skills:
-        _append_section_heading(story, "TECHNICAL SKILLS", style_section_heading)
-        _append_skill_lines(story, cleaned_skills, style_body)
+        _append_section_heading(story, "SKILLS" if is_v2_resume else "TECHNICAL SKILLS", style_section_heading)
+        _append_skill_lines(story, resume_data.skills, style_body)
 
     if resume_data.experience:
-        _append_section_heading(story, "PROFESSIONAL EXPERIENCE", style_section_heading)
+        _append_section_heading(
+            story,
+            "EXPERIENCE" if is_v2_resume else "PROFESSIONAL EXPERIENCE",
+            style_section_heading,
+        )
         for exp in resume_data.experience:
+            if is_v2_resume:
+                if _safe_text(exp.title):
+                    story.append(Paragraph(escape(_safe_text(exp.title)), style_role))
+                dates = ""
+                if _safe_text(exp.start_date) and _safe_text(exp.end_date):
+                    dates = f"{_safe_text(exp.start_date)} - {_safe_text(exp.end_date)}"
+                elif _safe_text(exp.start_date):
+                    dates = f"{_safe_text(exp.start_date)} - Present"
+                elif _safe_text(exp.end_date):
+                    dates = _safe_text(exp.end_date)
+
+                company_meta_parts = [
+                    _safe_text(exp.company),
+                    _safe_text(exp.location),
+                    dates,
+                ]
+                company_meta = " | ".join(part for part in company_meta_parts if part)
+                if company_meta:
+                    story.append(Paragraph(escape(company_meta), style_meta))
+
+                for block in exp.project_blocks:
+                    project_name = _safe_text(block.project)
+                    period = _safe_text(block.period)
+                    if project_name or period:
+                        project_heading = " - ".join(part for part in [project_name, period] if part)
+                        story.append(Paragraph(escape(project_heading), style_role))
+                    for bullet in block.bullets:
+                        _append_bullet_lines(story, str(bullet), style_bullet)
+                story.append(Spacer(1, 0.04 * inch))
+                continue
+
             if _safe_text(exp.job_title):
                 story.append(Paragraph(escape(_safe_text(exp.job_title)), style_role))
 
@@ -334,7 +388,7 @@ def create_resume_pdf(resume_data: Resume, header_title: str | None = None) -> b
             _append_bullet_lines(story, exp.description, style_bullet)
             story.append(Spacer(1, 0.04 * inch))
 
-    if resume_data.projects:
+    if not is_v2_resume and resume_data.projects:
         _append_section_heading(story, "PROJECTS", style_section_heading)
         for project in resume_data.projects:
             project_name = _safe_text(project.name)
@@ -360,6 +414,20 @@ def create_resume_pdf(resume_data: Resume, header_title: str | None = None) -> b
     if resume_data.education:
         _append_section_heading(story, "EDUCATION", style_section_heading)
         for edu in resume_data.education:
+            if is_v2_resume:
+                if _safe_text(edu.degree):
+                    story.append(Paragraph(escape(_safe_text(edu.degree)), style_role))
+                _append_left_right_line(
+                    story,
+                    _safe_text(edu.institution),
+                    _safe_text(edu.period),
+                    style_meta,
+                    style_meta_right,
+                    content_width,
+                )
+                story.append(Spacer(1, 0.04 * inch))
+                continue
+
             degree_parts = [_safe_text(edu.degree)]
             if _safe_text(edu.field_of_study):
                 degree_parts.append(_safe_text(edu.field_of_study))

@@ -27,7 +27,7 @@
           <div class="provider-switch resume-mode-switch" aria-label="Resume output mode">
             <span class="provider-switch-label">Resume Mode</span>
             <div class="provider-switch-group" role="group" aria-label="Choose resume output mode">
-              <button type="button" class="provider-option" data-resume-mode="one_page">One Page</button>
+              <button type="button" class="provider-option" data-resume-mode="balanced">Balanced</button>
               <button type="button" class="provider-option" data-resume-mode="project_mode">Projects</button>
             </div>
           </div>
@@ -310,7 +310,7 @@
       const RESUME_PROVIDER_STORAGE_KEY = "resume-generation-provider";
       const SUPPORTED_RESUME_PROVIDERS = new Set(["gemini", "sarvam"]);
       const RESUME_MODE_STORAGE_KEY = "resume-generation-mode";
-      const SUPPORTED_RESUME_MODES = new Set(["one_page", "project_mode"]);
+      const SUPPORTED_RESUME_MODES = new Set(["balanced", "project_mode"]);
 
       function getSelectedResumeProvider() {
         const stored = String(window.localStorage.getItem(RESUME_PROVIDER_STORAGE_KEY) || "").trim().toLowerCase();
@@ -343,13 +343,13 @@
         if (SUPPORTED_RESUME_MODES.has(stored)) {
           return stored;
         }
-        return "one_page";
+        return "balanced";
       }
 
       function setSelectedResumeMode(mode) {
         const normalized = SUPPORTED_RESUME_MODES.has(String(mode || "").trim().toLowerCase())
           ? String(mode).trim().toLowerCase()
-          : "one_page";
+          : "balanced";
         window.localStorage.setItem(RESUME_MODE_STORAGE_KEY, normalized);
         updateResumeModeUI();
         return normalized;
@@ -1282,7 +1282,7 @@
 
       resumeModeButtons.forEach((button) => {
         button.addEventListener("click", () => {
-          setSelectedResumeMode(button.dataset.resumeMode || "one_page");
+          setSelectedResumeMode(button.dataset.resumeMode || "balanced");
         });
       });
 

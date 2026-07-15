@@ -182,6 +182,172 @@ class LLMClient:
                 return model_id.strip() or "sarvam-105b"
         return cleaned or "sarvam-105b"
 
+    @staticmethod
+    def _is_gemini_model(model: str) -> bool:
+        cleaned = str(model or "").strip().lower()
+        return cleaned in {"gemini", "google"} or cleaned.startswith("gemini/") or cleaned.startswith("google/")
+
+    @staticmethod
+    def _normalize_gemini_model(model: str) -> str:
+        cleaned = str(model or "").strip()
+        if "/" in cleaned:
+            provider, model_id = cleaned.split("/", 1)
+            if provider.lower() in {"gemini", "google"}:
+                return model_id.strip() or "gemini-3.1-pro-preview"
+        if cleaned.lower() in {"gemini", "google"}:
+            return "gemini-3.1-pro-preview"
+        return cleaned or "gemini-3.1-pro-preview"
+
+    @classmethod
+    def _sanitize_gemini_response_schema(cls, schema: Any) -> Any:
+        allowed_keys = {
+            "$id",
+            "$defs",
+            "$ref",
+            "$anchor",
+            "type",
+            "format",
+            "title",
+            "description",
+            "enum",
+            "items",
+            "prefixItems",
+            "minItems",
+            "maxItems",
+            "minimum",
+            "maximum",
+            "anyOf",
+            "oneOf",
+            "properties",
+            "additionalProperties",
+            "required",
+            "propertyOrdering",
+        }
+        if isinstance(schema, list):
+            return [cls._sanitize_gemini_response_schema(item) for item in schema]
+        if not isinstance(schema, dict):
+            return schema
+
+        cleaned: dict[str, Any] = {}
+        for key, value in schema.items():
+            if key in {"properties", "$defs"} and isinstance(value, dict):
+                cleaned[key] = {
+                    prop_name: cls._sanitize_gemini_response_schema(prop_schema)
+                    for prop_name, prop_schema in value.items()
+                }
+            elif key == "additionalProperties":
+                cleaned[key] = (
+                    cls._sanitize_gemini_response_schema(value)
+                    if isinstance(value, dict)
+                    else value
+                )
+            elif key in allowed_keys:
+                cleaned[key] = cls._sanitize_gemini_response_schema(value)
+        return cleaned
+
+    def _request_gemini_direct(
+        self,
+        prompt: str,
+        system_prompt: Optional[str],
+        model: str,
+        temperature: float,
+        response_format: Optional[Type[BaseModel]] = None,
+        max_output_tokens: Optional[int] = None,
+    ) -> str:
+        api_key = str(
+            self.api_key
+            or os.environ.get("GEMINI_API_KEY")
+            or os.environ.get("GEMINI_FIRST_API_KEY")
+            or os.environ.get("LLM_API_KEY")
+            or ""
+        ).strip()
+        if not api_key:
+            raise RuntimeError("GEMINI_API_KEY is required for direct Gemini generation.")
+
+        model_id = self._normalize_gemini_model(model)
+        endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{model_id}:generateContent"
+        generation_config: dict[str, Any] = {
+            "temperature": temperature,
+            "responseMimeType": "application/json",
+        }
+        if max_output_tokens is not None:
+            generation_config["maxOutputTokens"] = max_output_tokens
+        payload: dict[str, Any] = {
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [{"text": prompt}],
+                }
+            ],
+            "generationConfig": generation_config,
+        }
+        if response_format is not None:
+            payload["generationConfig"]["responseJsonSchema"] = self._sanitize_gemini_response_schema(
+                response_format.model_json_schema()
+            )
+        if system_prompt:
+            payload["system_instruction"] = {
+                "parts": [{"text": system_prompt}],
+            }
+
+        response = requests.post(
+            endpoint,
+            json=payload,
+            headers={
+                "Content-Type": "application/json",
+                "x-goog-api-key": api_key,
+            },
+            timeout=None,
+        )
+        if not response.ok:
+            body_preview = response.text[:500].strip()
+            raise RuntimeError(f"Gemini API HTTP {response.status_code}: {body_preview}")
+
+        try:
+            data = response.json()
+        except Exception as exc:
+            raise RuntimeError(f"Gemini API returned non-JSON response: {exc}") from exc
+
+        candidates = data.get("candidates") or []
+        if not candidates:
+            return ""
+        parts = ((candidates[0] or {}).get("content") or {}).get("parts") or []
+        text = "\n".join(
+            str(part.get("text") or "")
+            for part in parts
+            if isinstance(part, dict) and str(part.get("text") or "").strip()
+        ).strip()
+        return text
+
+    def generate_content_direct_gemini(
+        self,
+        prompt: str,
+        system_prompt: Optional[str] = None,
+        temperature: float = 1,
+        model_override: Optional[str] = None,
+        response_format: Optional[Type[BaseModel]] = None,
+        max_output_tokens: Optional[int] = None,
+    ) -> str:
+        """Generate JSON content through Gemini's native generateContent API, bypassing LiteLLM."""
+        self._check_daily_budget()
+        model = model_override or self.model
+        if not self._is_gemini_model(model):
+            raise RuntimeError(f"Direct Gemini generation requires a Gemini model, got: {model}")
+
+        self.rate_limiter.acquire()
+        if self.request_delay > 0:
+            time.sleep(self.request_delay)
+        content = self._request_gemini_direct(
+            prompt=prompt,
+            system_prompt=system_prompt,
+            model=model,
+            temperature=temperature,
+            response_format=response_format,
+            max_output_tokens=max_output_tokens,
+        )
+        self._daily_count += 1
+        return content.strip()
+
     def _request_sarvam_direct(
         self,
         messages: list[dict[str, str]],

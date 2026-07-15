@@ -10,7 +10,7 @@ import config
 import supabase_utils
 from cover_letter_pdf import create_cover_letter_pdf
 from llm_client import primary_client
-from models import CoverLetterOutput, Resume
+from models import CoverLetterOutput, ResumeLike, is_resume_v2_model, parse_resume_data
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -42,7 +42,7 @@ def _serialize_job_for_prompt(job_details: Dict[str, Any]) -> str:
     return json.dumps(payload, indent=2)
 
 
-def _serialize_resume_for_cover_letter(resume: Resume) -> str:
+def _serialize_resume_for_cover_letter(resume: ResumeLike) -> str:
     lines: list[str] = [
         f"Name: {resume.name}",
         f"Location: {resume.location}",
@@ -55,10 +55,38 @@ def _serialize_resume_for_cover_letter(resume: Resume) -> str:
         "Technical Skills:",
     ]
 
-    lines.extend([skill.strip() for skill in resume.skills if str(skill).strip()])
+    if isinstance(resume.skills, dict):
+        lines.extend(
+            [
+                f"{str(category).strip()}: {str(values).strip()}"
+                for category, values in resume.skills.items()
+                if str(category).strip() and str(values).strip()
+            ]
+        )
+    else:
+        lines.extend([skill.strip() for skill in resume.skills if str(skill).strip()])
     lines.append("")
     lines.append("Experience:")
     for exp in resume.experience:
+        if is_resume_v2_model(resume):
+            lines.extend(
+                [
+                    f"{exp.title} | {exp.company} | {exp.location}",
+                    f"{exp.start_date} - {exp.end_date}",
+                ]
+            )
+            for block in exp.project_blocks:
+                block_label = " | ".join(
+                    part
+                    for part in [str(block.project or "").strip(), str(block.period or "").strip()]
+                    if part
+                )
+                if block_label:
+                    lines.append(block_label)
+                lines.extend([f"- {str(bullet).strip()}" for bullet in block.bullets if str(bullet).strip()])
+            lines.append("")
+            continue
+
         lines.extend(
             [
                 f"{exp.job_title} | {exp.company} | {exp.location}",
@@ -68,13 +96,45 @@ def _serialize_resume_for_cover_letter(resume: Resume) -> str:
         lines.extend([f"- {line.strip()}" for line in exp.description.splitlines() if line.strip()])
         lines.append("")
 
-    if resume.projects:
+    if not is_resume_v2_model(resume) and resume.projects:
         lines.append("Projects:")
         for project in resume.projects:
             lines.append(project.name)
             lines.extend([f"- {line.strip()}" for line in project.description.splitlines() if line.strip()])
             if project.technologies:
                 lines.append(f"Technologies: {', '.join(project.technologies)}")
+            lines.append("")
+
+    if resume.education:
+        lines.append("Education:")
+        for edu in resume.education:
+            if is_resume_v2_model(resume):
+                lines.extend(
+                    [
+                        str(edu.degree or "").strip(),
+                        " | ".join(
+                            part
+                            for part in [str(edu.institution or "").strip(), str(edu.period or "").strip()]
+                            if part
+                        ),
+                    ]
+                )
+            else:
+                period = " - ".join(
+                    part
+                    for part in [str(edu.start_year or "").strip(), str(edu.end_year or "").strip()]
+                    if part
+                )
+                lines.extend(
+                    [
+                        str(edu.degree or "").strip(),
+                        " | ".join(
+                            part
+                            for part in [str(edu.institution or "").strip(), period]
+                            if part
+                        ),
+                    ]
+                )
             lines.append("")
 
     return "\n".join(line for line in lines if line is not None).strip()
@@ -104,7 +164,7 @@ def _load_default_resume_location() -> str:
         return ""
 
 
-def _resolve_applicant_location(customized_resume: Resume) -> str:
+def _resolve_applicant_location(customized_resume: ResumeLike) -> str:
     default_location = _load_default_resume_location()
     if default_location:
         return default_location
@@ -113,7 +173,7 @@ def _resolve_applicant_location(customized_resume: Resume) -> str:
 
 def _resolve_contact_email(
     job_details: Dict[str, Any],
-    customized_resume: Resume,
+    customized_resume: ResumeLike,
     email_override: str | None = None,
 ) -> str:
     manual_override = str(email_override or "").strip()
@@ -128,61 +188,79 @@ def _resolve_contact_email(
     return str(customized_resume.email or "").strip()
 
 
-def _build_cover_letter_prompt(job_details: Dict[str, Any], customized_resume: Resume) -> str:
+def _build_cover_letter_prompt(job_details: Dict[str, Any], customized_resume: ResumeLike) -> str:
     return f"""
-Write a short, human cover letter for this technology job.
+Write a focused cover letter for this job.
 
 Target job:
 {_serialize_job_for_prompt(job_details)}
 
-Customized resume:
+Customized resume (use as evidence, not as a script):
 {_serialize_resume_for_cover_letter(customized_resume)}
 
-Recruiter mindset:
-- Write like a confident candidate, not like someone begging for an opportunity.
-- Make it feel like a fair give-and-take: the company has a need, and Vikas can contribute useful skills and delivery experience.
-- Use the job description to understand what the team needs.
-- Use the resume only as evidence. Do not retell the resume or copy its bullets.
-- Choose only 1 or 2 relevant proof points from the resume, then explain how they connect to this role.
-- Keep the tone simple, calm, and natural. It should sound like a real person wrote it.
-- If useful, say that Vikas is based in Toronto, Canada and would be happy to relocate to India for this role.
-- Never say or imply that Vikas is currently based in Hyderabad.
-- Do not invent facts, companies, dates, technologies, metrics, or achievements.
+What this letter must do:
 
-Structure:
-- Include a greeting.
-- Write only 2 or 3 short paragraphs total after the greeting.
-- Paragraph 1: mention the role/company and the clearest reason Vikas matches what they need.
-- Paragraph 2: connect one or two relevant resume examples to how Vikas can help the team deliver.
-- Optional paragraph 3: close with calm interest and mention relocation to India if it fits the job context.
-- Keep the full letter roughly 130 to 210 words.
+1. Identify the company, role, and the top 2 or 3 job needs from the job description. Use those needs quietly to decide what matters most, but do not explain the company's own job description back to them.
 
-Mandatory formatting:
-- Separate every block with one blank line.
-- Do not return the cover letter as one continuous paragraph.
-- Keep the greeting on its own line.
-- Keep each paragraph as its own block.
-- Do not include the date; the PDF renderer adds it separately.
-- End with exactly this sign-off format, with the name on a separate line:
+2. Open with a natural, human connection between the role and Vikas's recent work. Do not restate the company's needs. Do not copy the job description. The opening should sound like a developer recognizing familiar work, not like a sales pitch.
+
+3. Paragraph 1: briefly explain why the role fits the kind of work Vikas has already been doing. Keep it warm, practical, and confident. Do not start by saying the company needs or requires something.
+   Preferred opening style: "Appbay's Backend Programmer role feels close to the kind of work I have been doing over the last two years. Most of my recent work has been around building APIs, improving slow backend flows, and making database-backed features easier to maintain."
+   Another acceptable style: "This role caught my attention because the work lines up with what I have been doing in production: building APIs, working through backend performance issues, and supporting database-backed products used by real users."
+
+4. Paragraph 2: use one strong proof point from the resume. Pick the best match for the job: CliniScripts performance work, CliniAssess backend/data model/rule engine, TELUS Java/Spring Boot microservices and GraphQL, Kafka email notifications, WebSockets/Recall.ai, API/security/rate limiting, or another clearly relevant item. Do not list everything.
+
+5. Paragraph 3: connect that experience back to the company and say how Vikas can contribute. Keep it practical, not salesy.
+
+6. Do not mention location, relocation, Toronto, Canada, willingness to move, or availability. The job location field alone is not permission to add a location sentence. Only if the job description explicitly asks the applicant to state current location, the acceptable sentence is: "I am currently based in Hyderabad."
+
+Banned moves:
+- Never open with the pattern "Company needs X. Candidate has done X."
+- Do not open with "Company needs X", "Company is looking for X", "This role requires X", "Your job description requires X", "Appbay Technologies needs", or "The role needs someone who".
+- Do not use the first paragraph to list technologies. Mention at most one or two broad work areas, such as APIs, backend performance, database-backed systems, frontend integration, or production systems.
+- Do not invent facts, metrics, technologies, companies, dates, lessons, or hidden project context.
+- Do not repeat resume bullets line by line.
+- Do not dump skills. No sentence should list more than two technologies unless the sentence truly needs them.
+- Do not force every resume technology into the letter.
+- Do not over-polish the language. Keep it simple, direct, and professional.
+- Do not use fake excitement, desperate phrasing, or generic lines such as "I would be glad to bring my experience", "I hope to hear from you", "passionate", "proven track record", "results-driven", "dynamic", "fast-paced environment", "cutting-edge", "leveraging", "robust", "seamless", "optimize your backend services", "I am confident that my background", "I would be thrilled", "I believe I am a great fit", or "uniquely positioned".
+- Do not import job-posting adjectives into Vikas's work. If the resume says "Java/Spring Boot microservices", do not call them "scalable enterprise-grade microservices" unless the resume itself supports that exact wording.
+- Avoid starting too many sentences with "I".
+- Avoid mentioning Toronto even as a resume location reference unless the company or job description specifically requires that institution or city.
+
+Fact accuracy rules:
+- Do not say "250 active users". If mentioning CliniScripts scale, say "250+ doctors".
+- Do not say "data generation time". Say "note-generation time" or "AI note-generation time".
+- Do not claim CliniScripts used Node.js unless the resume source clearly says that.
+- It is okay to mention Node.js and MongoDB for CliniAssess.
+- Do not mention Toronto as Vikas's current location.
+- Do not mention relocation unless the job specifically requires it.
+- Vikas is currently in Hyderabad.
+
+Format:
+- Greeting on its own line. Use the company name from the job, such as "Dear Acme Hiring Team". If the company name is missing, use "Dear Hiring Team". Never use "To whom it may concern" or "Dear Sir/Madam".
+- Exactly 3 main body paragraphs after the greeting.
+- Keep each paragraph short and readable.
+- No bullet points. No date.
+- Around one page maximum.
+- End with:
 
 Sincerely,
 
 {customized_resume.name}
 
-Writing rules:
-- Mention the company and job title naturally when possible.
-- Focus on contribution: what Vikas can help build, improve, support, or deliver for this team.
-- Prefer concrete evidence over broad claims.
-- Match the role family from the job description. For frontend roles, use UI and user-facing product evidence. For backend roles, use APIs, services, databases, integrations, reliability, or security evidence. For AI/LLM, testing, cloud/devops, data, or other roles, choose the strongest matching evidence.
-- Keep the tone warm, capable, and natural, not fancy.
-- Use common words. Prefer "used", "built", "worked on", "improved", and "helped" over formal words like "leveraged", "spearheaded", "orchestrated", "harnessed", or "utilized".
-- Keep sentences short and readable.
-- Avoid phrases like "please consider my application", "I would be grateful", "given the opportunity", "I hope to hear from you", "I am thrilled", "proven track record", "dynamic", "results-oriented", "robust", "cutting-edge", "seamlessly", "transformative", and "uniquely positioned".
-- Job keywords are allowed only when they fit naturally and connect to real work.
-- Avoid generic clichés such as "I am writing to express my interest" unless phrased naturally.
-- No bullet points.
+Length: usually 250-350 words. Aim for 260-320 words. Do not compress the letter under 240 words unless the job description is extremely thin.
 
-Return only the final cover letter text.
+Self-check before returning:
+- Does the opening sound like a developer recognizing familiar work, not like "Company needs X. I have done X"? If not, rewrite it.
+- Does the opening copy the job description or tell the company what it needs? If yes, rewrite it.
+- Did you pick only the most relevant resume examples? If not, cut the weaker ones.
+- Does the letter explain why those examples matter for this role instead of just restating the resume? If not, rewrite.
+- Did you mention location, Toronto, Canada, relocation, willingness to move, or availability? If yes, remove that line unless the JD explicitly asks for current location; then say only that Vikas is currently based in Hyderabad.
+- Does it have exactly 3 body paragraphs after the greeting? If not, fix the structure.
+- Does it sound like a real developer wrote it, not a polished AI template? If not, simplify.
+
+Return the final cover letter text inside the required JSON schema.
 """.strip()
 
 
@@ -277,54 +355,132 @@ def _normalize_cover_letter_text(cover_letter_text: str, applicant_name: str) ->
     return "\n\n".join(cleaned_blocks).strip()
 
 
-def generate_cover_letter(job_details: Dict[str, Any], customized_resume: Resume) -> str:
+def _job_explicitly_requests_current_location(job_details: Dict[str, Any]) -> bool:
+    description = str(job_details.get("description") or "").lower()
+    explicit_markers = (
+        "current location",
+        "currently located",
+        "currently based",
+        "must be based",
+        "must be located",
+        "should be based",
+        "candidate must be located",
+        "candidates must be located",
+        "local candidates only",
+    )
+    return any(marker in description for marker in explicit_markers)
+
+
+def _strip_unrequested_location_sentences(cover_letter_text: str) -> str:
+    sentence_pattern = re.compile(
+        r"(?is)(^|(?<=[.!?])\s+)([^.!?\\n]*(?:currently based|currently located|relocat|willing to move|open to move|ready to join|availability)[^.!?\\n]*[.!?]?)"
+    )
+    return sentence_pattern.sub(lambda match: match.group(1), str(cover_letter_text or "")).strip()
+
+
+def _soften_unrequested_toronto_references(cover_letter_text: str) -> str:
+    text = str(cover_letter_text or "")
+    replacements = {
+        "at the University of Toronto": "at a university",
+        "the University of Toronto": "a university",
+        "University of Toronto": "a university",
+        "across Toronto clinics": "across clinics",
+        "Toronto clinics": "clinics",
+    }
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+    text = re.sub(r"\bToronto\b,?\s*", "", text)
+    return re.sub(r"\s{2,}", " ", text)
+
+
+def generate_cover_letter(job_details: Dict[str, Any], customized_resume: ResumeLike) -> str:
     prompt = _build_cover_letter_prompt(job_details, customized_resume)
     system_prompt = """
-You are a practical technology recruiter, cover letter writer, and precise JSON generator.
+You are writing a practical cover letter for a working software engineer applying to a real job in 2026. Recruiters reject letters that sound generic, repeat the resume, stuff skills, or read like a polished template.
 
-Rules:
-- Return exactly one valid JSON object matching the required schema.
-- Do not output markdown, commentary, or extra text.
-- Use the job description to understand the employer's need.
-- Use the customized resume only as evidence for what Vikas can contribute.
-- Treat the selected job as user-verified for fit.
-- Match the job's role family without copying generic job-posting keywords as filler.
-- Do not repeat the resume line by line.
-- Do not invent unsupported facts.
-- Write 2 or 3 short paragraphs after the greeting.
-- Keep the cover letter concise, human, specific, confident, and ATS-friendly.
-- Write like a capable candidate explaining how he can help the company, not like someone asking for a favor.
-- Make the letter feel like give-and-take: company need plus candidate contribution.
-- Use simple plain English for India-focused technology applications. Avoid over-polished AI language, buzzwords, needy phrasing, dramatic enthusiasm, and formal corporate phrasing.
-- Do not favor backend, frontend, Java, Go, Python, AI/LLM, cloud, testing, or any other role family by default. Let the job description decide the emphasis.
+The letter's job is to connect the job description to one or two real pieces of the candidate's work, explain why those examples matter for this role, and stop. It should sound like a real developer wrote it: simple, direct, specific, and professional.
+
+Hard rules:
+- Use the job description to identify the company, role, and 2 or 3 real requirements, but do not explain the company's own requirements back to them.
+- Use the customized resume only as evidence. Do not invent facts beyond it.
+- Do not rewrite or summarize the whole resume.
+- Use one or two relevant experiences, not a list of projects.
+- Explain the practical connection between those examples and the target role.
+- Open with a natural, human connection between the role and Vikas's recent work. The opening should sound like a developer recognizing familiar work, not a sales pitch.
+- Prefer openings like "This role feels close to the kind of work I have been doing..." or "This role caught my attention because the work lines up with..." over openings that diagnose the company's needs.
+- Never open with the pattern "Company needs X. Candidate has done X."
+- Do not open with "Company needs X", "Company is looking for X", "This role requires X", "Your job description requires X", "Appbay Technologies needs", or "The role needs someone who".
+- Do not use the first paragraph to list technologies. Mention at most one or two broad work areas, such as APIs, backend performance, database-backed systems, frontend integration, or production systems.
+- Write exactly 3 main body paragraphs after the greeting, then a short sign-off.
+- Keep it around one page maximum, usually 250-350 words. Aim for 260-320 words and do not default to a very short letter.
+- Do not make it a formal AI essay or a paragraph version of the resume.
+- Do not mention location, relocation, Toronto, Canada, willingness to move, or availability. The job location field alone is not permission to add a location sentence. Only if the job description explicitly asks the applicant to state current location, say: "I am currently based in Hyderabad."
+- Avoid fake excitement, generic closers, over-polished AI language, and desperate phrasing.
+- Avoid starting too many sentences with "I".
+- Do not stuff every technology from the resume into the letter.
+- Do not import job-posting adjectives like "scalable", "robust", "fault-tolerant", "cloud-native", "distributed", "enterprise-grade", "high-performance", "mission-critical", "RESTful", or "modern" into the candidate's work unless the resume already supports that exact quality.
+- Avoid banned phrases such as "results-driven", "passionate", "dynamic", "fast-paced environment", "cutting-edge", "leveraging", "robust", "seamless", "I am confident that my background", "I would be thrilled", and "I believe I am a great fit".
+- Do not say "250 active users"; say "250+ doctors" if that metric appears.
+- Do not say "data generation time"; say "note-generation time" or "AI note-generation time".
+- Do not claim CliniScripts used Node.js unless the resume source clearly says that.
+- It is okay to mention Node.js and MongoDB for CliniAssess.
+
+Return exactly one valid JSON object matching the required schema. The cover letter text goes inside the schema. No markdown, no commentary outside the schema.
 """.strip()
 
+    use_direct_gemini = primary_client._is_gemini_model(str(config.LLM_MODEL or ""))  # noqa: SLF001
+    logging.info(
+        "Cover letter LLM configuration: provider=%s, model=%s, transport=%s",
+        str(config.LLM_MODEL or "").split("/", 1)[0] or "unknown",
+        str(config.LLM_MODEL or "").strip() or "unknown",
+        "direct_gemini" if use_direct_gemini else "litellm",
+    )
+
     try:
-        llm_output = primary_client.generate_content(
-            prompt=prompt,
-            system_prompt=system_prompt,
-            temperature=0.45,
-            response_format=CoverLetterOutput,
-        )
+        if use_direct_gemini:
+            llm_output = primary_client.generate_content_direct_gemini(
+                prompt=prompt,
+                system_prompt=system_prompt,
+                temperature=0.45,
+                response_format=CoverLetterOutput,
+            )
+        else:
+            llm_output = primary_client.generate_content(
+                prompt=prompt,
+                system_prompt=system_prompt,
+                temperature=0.45,
+                response_format=CoverLetterOutput,
+            )
     except Exception as exc:
         if not _is_retryable_cover_letter_llm_error(exc):
             raise
         logging.warning(
-            "Primary cover-letter model failed with a temporary provider error. "
-            "Retrying once with the Gemini fallback pool. Error: %s",
+            "Cover-letter model failed with a temporary provider error. Retrying once. Error: %s",
             exc,
         )
         time.sleep(2)
-        llm_output = primary_client.generate_content(
-            prompt=prompt,
-            system_prompt=system_prompt,
-            temperature=0.45,
-            response_format=CoverLetterOutput,
-            model_override="gemini",
-        )
+        if use_direct_gemini:
+            llm_output = primary_client.generate_content_direct_gemini(
+                prompt=prompt,
+                system_prompt=system_prompt,
+                temperature=0.45,
+                response_format=CoverLetterOutput,
+            )
+        else:
+            llm_output = primary_client.generate_content(
+                prompt=prompt,
+                system_prompt=system_prompt,
+                temperature=0.45,
+                response_format=CoverLetterOutput,
+                model_override="gemini",
+            )
 
     parsed_output = CoverLetterOutput.model_validate_json(llm_output)
-    return _normalize_cover_letter_text(parsed_output.cover_letter, customized_resume.name)
+    cover_letter_text = parsed_output.cover_letter
+    if not _job_explicitly_requests_current_location(job_details):
+        cover_letter_text = _strip_unrequested_location_sentences(cover_letter_text)
+        cover_letter_text = _soften_unrequested_toronto_references(cover_letter_text)
+    return _normalize_cover_letter_text(cover_letter_text, customized_resume.name)
 
 
 def _is_retryable_cover_letter_llm_error(exc: Exception) -> bool:
@@ -370,7 +526,7 @@ def generate_cover_letter_for_job(job_id: str, email_override: str | None = None
         return 1
 
     try:
-        customized_resume = Resume.model_validate(customized_resume_record)
+        customized_resume = parse_resume_data(customized_resume_record)
     except Exception as exc:
         logging.error(f"Failed to parse customized resume {customized_resume_id}: {exc}")
         return 1

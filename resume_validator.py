@@ -4,7 +4,7 @@ from typing import Iterable
 
 import pdfplumber
 
-from models import Resume
+from models import ResumeLike, is_resume_v2_model
 
 
 def _normalize_text(value: str | None) -> str:
@@ -37,7 +37,7 @@ def _contains(normalized_haystack: str, normalized_needle: str) -> bool:
 
 def validate_generated_resume_pdf(
     pdf_bytes: bytes,
-    resume_data: Resume,
+    resume_data: ResumeLike,
     header_title: str | None = None,
 ) -> tuple[bool, list[str]]:
     """
@@ -58,6 +58,7 @@ def validate_generated_resume_pdf(
     normalized_text = _normalize_text(combined_text)
     normalized_text_no_urls = _normalize_url(combined_text)
     normalized_phone_text = _normalize_phone(combined_text)
+    is_v2_resume = is_resume_v2_model(resume_data)
 
     critical_checks: list[tuple[str, bool]] = [
         ("Missing candidate name in extracted PDF text.", _contains(normalized_text, _normalize_text(resume_data.name))),
@@ -80,15 +81,23 @@ def validate_generated_resume_pdf(
             )
         )
 
-    expected_sections = [
-        ("PROFESSIONAL SUMMARY", _has_content(resume_data.summary)),
-        ("TECHNICAL SKILLS", _has_content(resume_data.skills)),
-        ("PROFESSIONAL EXPERIENCE", _has_content(resume_data.experience)),
-        ("PROJECTS", _has_content(resume_data.projects)),
-        ("EDUCATION", _has_content(resume_data.education)),
-        ("CERTIFICATIONS", _has_content(resume_data.certifications)),
-        ("LANGUAGES", _has_content(resume_data.languages)),
-    ]
+    if is_v2_resume:
+        expected_sections = [
+            ("SUMMARY", _has_content(resume_data.summary)),
+            ("SKILLS", _has_content(resume_data.skills)),
+            ("EXPERIENCE", _has_content(resume_data.experience)),
+            ("EDUCATION", _has_content(resume_data.education)),
+        ]
+    else:
+        expected_sections = [
+            ("PROFESSIONAL SUMMARY", _has_content(resume_data.summary)),
+            ("TECHNICAL SKILLS", _has_content(resume_data.skills)),
+            ("PROFESSIONAL EXPERIENCE", _has_content(resume_data.experience)),
+            ("PROJECTS", _has_content(resume_data.projects)),
+            ("EDUCATION", _has_content(resume_data.education)),
+            ("CERTIFICATIONS", _has_content(resume_data.certifications)),
+            ("LANGUAGES", _has_content(resume_data.languages)),
+        ]
     for heading, should_exist in expected_sections:
         if should_exist and heading.lower() not in normalized_text:
             critical_checks.append(
@@ -100,20 +109,35 @@ def validate_generated_resume_pdf(
             issues.append(message)
 
     for exp in resume_data.experience:
+        if is_v2_resume:
+            company_name = _normalize_text(exp.company)
+            if company_name and company_name not in normalized_text:
+                issues.append(
+                    f"Missing experience company '{exp.company}' in extracted PDF text."
+                )
+            for block in exp.project_blocks:
+                project_name = _normalize_text(block.project)
+                if project_name and project_name not in normalized_text:
+                    issues.append(
+                        f"Missing project block title '{block.project}' in extracted PDF text."
+                    )
+            continue
+
         job_title = _normalize_text(exp.job_title)
         if job_title and job_title not in normalized_text:
             issues.append(
                 f"Missing experience job title '{exp.job_title}' in extracted PDF text."
             )
 
-    for project in resume_data.projects:
-        project_name = _normalize_text(project.name)
-        if project_name and project_name not in normalized_text:
-            issues.append(
-                f"Missing project name '{project.name}' in extracted PDF text."
-            )
+    if not is_v2_resume:
+        for project in resume_data.projects:
+            project_name = _normalize_text(project.name)
+            if project_name and project_name not in normalized_text:
+                issues.append(
+                    f"Missing project name '{project.name}' in extracted PDF text."
+                )
 
-    if resume_data.links.linkedin:
+    if resume_data.links and resume_data.links.linkedin:
         normalized_link = _normalize_url(resume_data.links.linkedin)
         if normalized_link and normalized_link not in normalized_text_no_urls:
             issues.append("Missing LinkedIn URL in extracted PDF text.")

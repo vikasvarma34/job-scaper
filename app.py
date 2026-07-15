@@ -10,14 +10,13 @@ from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 
-from flask import Flask, Response, abort, jsonify, redirect, render_template, request, send_file, url_for
-from pydantic import ValidationError
-
+from flask import Flask, Response, abort, flash, get_flashed_messages, jsonify, redirect, render_template, request, send_file, url_for
 import config
+import custom_resume_generator
 import pdf_generator
 import supabase_utils
 from cover_letter_pdf import create_cover_letter_pdf
-from models import Resume
+from models import ResumeLike, is_resume_v2_model, parse_resume_data, parse_resume_json_text
 
 
 ROOT_DIR = Path(__file__).resolve().parent
@@ -82,11 +81,13 @@ _RESUME_PROVIDER_ALIASES = {
     "sarvam": "sarvam",
 }
 _RESUME_MODE_ALIASES = {
-    "default": "one_page",
-    "onepage": "one_page",
-    "one_page": "one_page",
-    "no_projects": "one_page",
-    "compact": "one_page",
+    "default": "balanced",
+    "balanced": "balanced",
+    "standard": "balanced",
+    "onepage": "balanced",
+    "one_page": "balanced",
+    "no_projects": "balanced",
+    "compact": "balanced",
     "projects": "project_mode",
     "project": "project_mode",
     "project_mode": "project_mode",
@@ -222,7 +223,7 @@ def _normalize_resume_provider(provider: str | None) -> str:
 
 def _normalize_resume_mode(mode: str | None) -> str:
     cleaned = str(mode or "").strip().lower().replace("-", "_")
-    return _RESUME_MODE_ALIASES.get(cleaned, "one_page")
+    return _RESUME_MODE_ALIASES.get(cleaned, "balanced")
 
 
 def _resume_generation_env_overrides(provider: str | None) -> dict[str, str]:
@@ -329,7 +330,7 @@ def _build_command(
     selected_provider = _normalize_resume_provider(resume_provider)
     provider_suffix = " [Sarvam]" if selected_provider == "sarvam" else " [Gemini]"
     selected_resume_mode = _normalize_resume_mode(resume_mode)
-    mode_suffix = " [Projects]" if selected_resume_mode == "project_mode" else " [One Page]"
+    mode_suffix = " [Projects]" if selected_resume_mode == "project_mode" else " [Balanced]"
 
     def _append_email_override(command: list[str]) -> list[str]:
         if cleaned_email_override:
@@ -612,8 +613,23 @@ def _build_cover_letter_storage_path(job_id: str, company: object) -> str:
     return f"cover_letters/VIKAS_POKALA_{company_token}_{job_token}_COVER_LETTER.pdf"
 
 
-def _resume_to_pretty_json(resume: Resume) -> str:
+def _resume_to_pretty_json(resume: ResumeLike) -> str:
     return json.dumps(resume.model_dump(), indent=2, ensure_ascii=False)
+
+
+def _normalize_v2_resume_for_pdf(
+    resume: ResumeLike,
+    job_record: dict,
+    header_title: str,
+) -> tuple[ResumeLike, str]:
+    if not is_resume_v2_model(resume):
+        return resume, header_title
+
+    target_title = custom_resume_generator.normalize_target_title(
+        header_title or job_record.get("job_title"),
+        job_record.get("description"),
+    )
+    return custom_resume_generator._apply_v2_target_title(resume, target_title), target_title  # noqa: SLF001
 
 
 def _fetch_all_jobs(batch_size: int = 500) -> tuple[list[dict], str | None]:
@@ -939,9 +955,14 @@ def restore_job_resume(job_id: str):
     header_title = stored_header_title or str(job_record.get("job_title") or "").strip()
 
     try:
-        current_resume = Resume.model_validate(customized_resume_record)
+        current_resume = parse_resume_data(customized_resume_record)
     except Exception as exc:
         return jsonify({"ok": False, "error": f"Failed to parse saved resume data: {exc}"}), 500
+    current_resume, header_title = _normalize_v2_resume_for_pdf(
+        current_resume,
+        job_record,
+        header_title,
+    )
 
     try:
         resume_pdf = pdf_generator.create_resume_pdf(
@@ -1065,12 +1086,12 @@ def edit_documents(job_id: str):
     )
 
     try:
-        current_resume = Resume.model_validate(customized_resume_record)
+        current_resume = parse_resume_data(customized_resume_record)
     except Exception as exc:
         abort(500, f"Failed to parse customized resume: {exc}")
 
     save_error = ""
-    save_success = request.args.get("saved") == "1"
+    save_success = any(category == "success" for category, _ in get_flashed_messages(with_categories=True))
     resume_json_text = _resume_to_pretty_json(current_resume)
     cover_letter_text = str(cover_letter_record.get("cover_letter_text") or "").strip()
 
@@ -1080,10 +1101,16 @@ def edit_documents(job_id: str):
         cover_letter_text = str(request.form.get("cover_letter_text") or "").strip()
 
         try:
-            updated_resume = Resume.model_validate_json(resume_json_text)
-        except ValidationError as exc:
+            updated_resume = parse_resume_json_text(resume_json_text)
+        except Exception as exc:
             save_error = str(exc)
         else:
+            header_title = (
+                header_title
+                or stored_header_title
+                or str(updated_resume.title or "").strip()
+                or str(job_record.get("job_title") or "").strip()
+            )
             resume_path = str(customized_resume_record.get("resume_link") or "").strip()
             if not resume_path:
                 abort(500, "Existing resume path is missing.")
@@ -1150,7 +1177,8 @@ def edit_documents(job_id: str):
                                     save_error = "Resume saved, but cover letter record update failed."
 
                     if not save_error:
-                        return redirect(url_for("edit_documents", job_id=cleaned_job_id, saved=1))
+                        flash("Manual edits saved successfully.", "success")
+                        return redirect(url_for("edit_documents", job_id=cleaned_job_id))
 
             if not save_error:
                 save_error = "Unable to save your manual edits."

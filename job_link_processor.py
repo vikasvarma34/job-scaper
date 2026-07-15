@@ -18,7 +18,7 @@ import custom_resume_generator
 import resume_validator
 import supabase_utils
 from llm_client import primary_client
-from models import ATSKeywordPlan, JobPostingIntakeOutput, Resume
+from models import ATSKeywordPlan, JobPostingIntakeOutput, ResumeLike
 
 try:
     from playwright.async_api import async_playwright
@@ -398,68 +398,75 @@ def _build_manual_job_row(
 async def _generate_resume_for_manual_job(
     *,
     job_details: dict[str, Any],
-    base_resume: Resume,
+    base_resume: ResumeLike,
     keyword_plan: ATSKeywordPlan,
     email_override: str | None = None,
-    resume_mode: str = custom_resume_generator.RESUME_MODE_ONE_PAGE,
+    resume_mode: str = custom_resume_generator.RESUME_MODE_BALANCED,
 ) -> int:
     selected_resume_mode = custom_resume_generator._normalize_resume_mode(resume_mode)  # noqa: SLF001
-    rewritten_resume = await custom_resume_generator.rewrite_resume_with_keyword_plan(
-        full_resume=base_resume,
-        job_details=job_details,
-        keyword_plan=keyword_plan,
-        resume_mode=selected_resume_mode,
-    )
-
-    personalized_resume = custom_resume_generator._apply_two_step_rewrite_to_resume(  # noqa: SLF001
-        base_resume=base_resume,
-        rewrite_output=rewritten_resume,
-    )
-    personalized_resume = custom_resume_generator._normalize_personalized_resume_output(  # noqa: SLF001
-        base_resume=base_resume,
-        personalized_resume=personalized_resume,
-    )
-    personalized_resume = custom_resume_generator._apply_resume_mode_constraints(  # noqa: SLF001
-        personalized_resume,
-        selected_resume_mode,
-    )
-    if (
-        selected_resume_mode == custom_resume_generator.RESUME_MODE_PROJECTS
-        and base_resume.projects
-        and not personalized_resume.projects
-    ):
-        logging.info(
-            "Project Mode returned no projects for manual job %s. Falling back to the strongest base project.",
-            job_details.get("job_id"),
+    if custom_resume_generator.is_resume_v2_model(base_resume):  # noqa: SLF001
+        personalized_resume, header_title = await custom_resume_generator.personalize_resume_v2_with_controlled_tailoring(
+            job_details=job_details,
+            base_resume=base_resume,
+            resume_mode=selected_resume_mode,
         )
-        personalized_resume.projects = custom_resume_generator._fallback_projects_for_project_mode(  # noqa: SLF001
-            base_resume,
-            keyword_plan,
-            max_projects=1,
+    else:
+        rewritten_resume = await custom_resume_generator.rewrite_resume_with_keyword_plan(
+            full_resume=base_resume,
+            job_details=job_details,
+            keyword_plan=keyword_plan,
+            resume_mode=selected_resume_mode,
+        )
+
+        personalized_resume = custom_resume_generator._apply_two_step_rewrite_to_resume(  # noqa: SLF001
+            base_resume=base_resume,
+            rewrite_output=rewritten_resume,
+        )
+        personalized_resume = custom_resume_generator._normalize_personalized_resume_output(  # noqa: SLF001
+            base_resume=base_resume,
+            personalized_resume=personalized_resume,
         )
         personalized_resume = custom_resume_generator._apply_resume_mode_constraints(  # noqa: SLF001
             personalized_resume,
             selected_resume_mode,
         )
+        if (
+            selected_resume_mode == custom_resume_generator.RESUME_MODE_PROJECTS
+            and base_resume.projects
+            and not personalized_resume.projects
+        ):
+            logging.info(
+                "Project Mode returned no projects for manual job %s. Falling back to the strongest base project.",
+                job_details.get("job_id"),
+            )
+            personalized_resume.projects = custom_resume_generator._fallback_projects_for_project_mode(  # noqa: SLF001
+                base_resume,
+                keyword_plan,
+                max_projects=1,
+            )
+            personalized_resume = custom_resume_generator._apply_resume_mode_constraints(  # noqa: SLF001
+                personalized_resume,
+                selected_resume_mode,
+            )
 
-    sections_to_validate = ["experience"]
-    if selected_resume_mode == custom_resume_generator.RESUME_MODE_PROJECTS:
-        sections_to_validate.append("projects")
+        sections_to_validate = ["experience"]
+        if selected_resume_mode == custom_resume_generator.RESUME_MODE_PROJECTS:
+            sections_to_validate.append("projects")
 
-    for section_name in sections_to_validate:
-        is_valid, reason = custom_resume_generator.validate_customization(
-            section_name,
-            getattr(base_resume, section_name),
-            getattr(personalized_resume, section_name),
-            allow_project_technology_changes=(section_name == "projects"),
+        for section_name in sections_to_validate:
+            is_valid, reason = custom_resume_generator.validate_customization(
+                section_name,
+                getattr(base_resume, section_name),
+                getattr(personalized_resume, section_name),
+                allow_project_technology_changes=(section_name == "projects"),
+            )
+            if not is_valid:
+                raise ValueError(f"Manual job-link validation failed for {section_name}: {reason}")
+
+        header_title = custom_resume_generator._normalize_header_title(  # noqa: SLF001
+            raw_title=job_details.get("job_title"),
+            rewritten_title=rewritten_resume.header_title,
         )
-        if not is_valid:
-            raise ValueError(f"Manual job-link validation failed for {section_name}: {reason}")
-
-    header_title = custom_resume_generator._normalize_header_title(  # noqa: SLF001
-        raw_title=job_details.get("job_title"),
-        rewritten_title=rewritten_resume.header_title,
-    )
 
     personalized_resume = custom_resume_generator._apply_job_contact_overrides(  # noqa: SLF001
         personalized_resume,
@@ -515,7 +522,7 @@ async def _generate_resume_for_manual_job(
 async def process_job_link(
     job_url: str,
     email_override: str | None = None,
-    resume_mode: str = custom_resume_generator.RESUME_MODE_ONE_PAGE,
+    resume_mode: str = custom_resume_generator.RESUME_MODE_BALANCED,
 ) -> int:
     normalized_url = _normalize_url(job_url)
     if not normalized_url:
@@ -581,12 +588,8 @@ def main() -> int:
     )
     parser.add_argument(
         "--resume-mode",
-        choices=[
-            custom_resume_generator.RESUME_MODE_ONE_PAGE,
-            custom_resume_generator.RESUME_MODE_PROJECTS,
-        ],
-        default=custom_resume_generator.RESUME_MODE_ONE_PAGE,
-        help="Choose resume output mode. Defaults to one_page; use project_mode to include Projects.",
+        default=custom_resume_generator.RESUME_MODE_BALANCED,
+        help="Choose resume output mode. Defaults to balanced.",
     )
     args = parser.parse_args()
     return asyncio.run(

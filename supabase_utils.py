@@ -1,7 +1,7 @@
 from supabase import create_client, Client
 import config # Import configuration
 from typing import Optional, Any, Dict
-from models import Resume
+from models import ResumeLike, is_resume_v2_model
 import datetime # Import datetime module
 import logging # Import logging
 
@@ -867,8 +867,28 @@ def mark_jobs_as_applied(job_ids: list[str]) -> tuple[int, int]:
         logging.error(f"Error marking jobs as applied: {e}")
         return 0, len(cleaned_ids)
 
+def _resume_model_to_supabase_payload(resume_data: ResumeLike) -> Dict[str, Any]:
+    if hasattr(resume_data, 'model_dump'):
+        payload = resume_data.model_dump(exclude_none=True)
+    else:
+        payload = resume_data.dict(exclude_none=True)
+
+    if is_resume_v2_model(resume_data):
+        payload["skills"] = [
+            f"{str(category).strip()}: {str(values).strip()}"
+            for category, values in resume_data.skills.items()
+            if str(category).strip() and str(values).strip()
+        ]
+        payload.setdefault("projects", [])
+        payload.setdefault("certifications", [])
+        payload.setdefault("languages", [])
+        payload.pop("title", None)
+
+    return payload
+
+
 def save_customized_resume(
-    resume_data: 'Resume',
+    resume_data: ResumeLike,
     resume_path: str,
     header_title: str | None = None,
 ) -> Optional[Any]: # Return type changed
@@ -897,14 +917,14 @@ def save_customized_resume(
         return None
 
     try:
-        # Convert Pydantic model to dict for Supabase
-        if hasattr(resume_data, 'model_dump'):
-            data_to_insert = resume_data.model_dump(exclude_none=True)
-        else:
-            data_to_insert = resume_data.dict(exclude_none=True)
+        data_to_insert = _resume_model_to_supabase_payload(resume_data)
 
         data_to_insert['resume_link'] = resume_path
-        data_to_insert['header_title'] = str(header_title or "").strip() or None
+        data_to_insert['header_title'] = (
+            str(header_title or "").strip()
+            or str(getattr(resume_data, "title", "") or "").strip()
+            or None
+        )
 
         logging.info(
             f"Saving customized resume for email: {getattr(resume_data, 'email', 'N/A')} "
@@ -982,7 +1002,7 @@ def get_customized_resume(resume_id: str) -> Optional[Dict[str, Any]]:
 
 def update_customized_resume(
     resume_id: str,
-    resume_data: 'Resume',
+    resume_data: ResumeLike,
     resume_path: str,
     header_title: str | None = None,
 ) -> bool:
@@ -994,12 +1014,13 @@ def update_customized_resume(
         return False
 
     try:
-        if hasattr(resume_data, 'model_dump'):
-            update_payload = resume_data.model_dump(exclude_none=True)
-        else:
-            update_payload = resume_data.dict(exclude_none=True)
+        update_payload = _resume_model_to_supabase_payload(resume_data)
         update_payload["resume_link"] = resume_path
-        update_payload["header_title"] = str(header_title or "").strip() or None
+        update_payload["header_title"] = (
+            str(header_title or "").strip()
+            or str(getattr(resume_data, "title", "") or "").strip()
+            or None
+        )
 
         response = (
             supabase.table(config.SUPABASE_CUSTOMIZED_RESUMES_TABLE_NAME)
