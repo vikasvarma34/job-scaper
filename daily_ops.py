@@ -14,7 +14,7 @@ from supabase_utils import supabase
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 HISTORICAL_APPLIED_STATUSES = ["applied", "previously_applied"]
-PRESERVED_CLEANUP_STATUSES = HISTORICAL_APPLIED_STATUSES + ["safe_for_future"]
+PRESERVED_CLEANUP_STATUSES = HISTORICAL_APPLIED_STATUSES + ["safe_for_future", "not_available"]
 
 
 def _run_python_script(script_name: str, args: list[str] | None = None) -> bool:
@@ -133,6 +133,20 @@ def cleanup_for_free_tier(delete_base_resume: bool, delete_source_resume: bool) 
             .execute()
         )
         preserved_jobs = preserved_jobs_response.data or []
+        not_available_ids = [
+            str(row.get("job_id") or "").strip()
+            for row in preserved_jobs
+            if str(row.get("job_id") or "").strip()
+            and str(row.get("status") or "").strip().lower() == "not_available"
+        ]
+        if not_available_ids:
+            supabase.table(config.SUPABASE_TABLE_NAME).update(
+                supabase_utils.NOT_AVAILABLE_COMPACT_FIELDS
+            ).in_("job_id", not_available_ids).execute()
+            for row in preserved_jobs:
+                if str(row.get("job_id") or "").strip() in set(not_available_ids):
+                    row["customized_resume_id"] = None
+
         preserved_job_ids = [
             str(row.get("job_id") or "").strip()
             for row in preserved_jobs
@@ -183,7 +197,8 @@ def cleanup_for_free_tier(delete_base_resume: bool, delete_source_resume: bool) 
             supabase.table(config.SUPABASE_CUSTOMIZED_RESUMES_TABLE_NAME).update({"resume_link": None}).in_("id", preserved_resume_ids).execute()
         logging.info("Cleared non-preserved customized_resumes rows.")
 
-        # 4) Delete jobs so next day starts clean, but keep applied history and safe-for-future jobs.
+        # 4) Delete jobs so next day starts clean, but keep applied history,
+        # safe-for-future jobs, and compact not-available duplicate tombstones.
         all_job_rows = (
             supabase.table(config.SUPABASE_TABLE_NAME)
             .select("job_id")

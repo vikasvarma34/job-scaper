@@ -283,11 +283,22 @@ def _get_experience_year_bounds(description: str | None) -> tuple[int | None, in
 
 def _passes_experience_requirement(description: str | None) -> bool:
     """
-    Experience-based prefiltering is disabled so jobs are preserved for LLM scoring.
-    Keep this helper returning True to avoid dropping roles because regex parsing can
-    confuse education years with work-experience requirements.
+    Keep roles whose explicit minimum experience is within the configured limit.
+    If a posting does not clearly state a requirement, preserve it for normal scoring.
     """
-    return True
+    minimum_years = _get_min_years_experience(description)
+    if minimum_years is None:
+        return True
+
+    max_allowed_years = int(
+        getattr(
+            config,
+            "LINKEDIN_MAX_ALLOWED_MIN_EXPERIENCE_YEARS",
+            getattr(config, "LINKEDIN_MAX_ALLOWED_EXPERIENCE_YEARS", 0),
+        )
+        or 0
+    )
+    return max_allowed_years <= 0 or minimum_years <= max_allowed_years
 
 
 def _build_description_excerpt(description: str | None, max_chars: int = 280) -> str:

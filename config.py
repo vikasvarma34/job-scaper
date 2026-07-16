@@ -92,41 +92,32 @@ SCRAPER_LOG_LEVEL = "INFO"  # Use "DEBUG" only when you want full request-by-req
 
 # --- Search Configuration ---
 LINKEDIN_SEARCH_QUERIES = [
-    "java full stack developer",
-    "full stack developer java react",
+    "full stack engineer",
+    "full stack developer react node",
+    "backend developer node.js typescript",
     "backend developer java spring boot",
-    "java backend developer",
-    "developer associate java",
-    "associate software engineer java",
+    "software engineer 1",
+    "associate software engineer",
 ]
 LINKEDIN_EXPANDED_SEARCH_QUERIES = [
+    "software developer",
+    "backend engineer",
     "java software engineer",
-    "software engineer ii java",
-    "application developer java",
-    "associate java developer",
-    "full stack engineer java",
-    "backend engineer java microservices",
+    "node.js developer",
+    "typescript developer",
+    "react developer",
+    "golang developer",
 ]
-LINKEDIN_LOCATION = "India"
-# Strict city mode: scraper will run searches per city in this list.
+LINKEDIN_LOCATION = "Hyderabad, Telangana, India"
+# Hyderabad only. Do not fall back to other cities or broad India searches.
 LINKEDIN_LOCATIONS = [
     "Hyderabad, Telangana, India",
-    "Bengaluru, Karnataka, India",
-    "Mumbai, Maharashtra, India",
-    "Chennai, Tamil Nadu, India",
-    "Delhi, India",
 ]
-LINKEDIN_BROAD_LOCATIONS = [
-    "India",
-    "Remote, India",
-]
+LINKEDIN_BROAD_LOCATIONS = []
 # Optional geoId. Set None when using LINKEDIN_LOCATIONS to avoid country-wide overriding.
 LINKEDIN_GEO_ID = None
-# Priority behavior:
-# 1) Run Hyderabad first.
-# 2) If Hyderabad still does not reach the target, try expanded Hyderabad queries.
-# 3) Only then move to Bangalore, then later cities if still needed.
-LINKEDIN_ENABLE_SECONDARY_CITY_FALLBACK = True
+# Run primary Hyderabad queries first, then expanded Hyderabad queries if needed.
+LINKEDIN_ENABLE_SECONDARY_CITY_FALLBACK = False
 # Legacy LinkedIn-only target. Multi-source runs now use TARGET_SAVED_JOBS_PER_RUN
 # together with SCRAPER_SOURCE_FINAL_CAPS below.
 LINKEDIN_MAX_NEW_JOBS_PER_RUN = TARGET_SAVED_JOBS_PER_RUN
@@ -138,15 +129,6 @@ LINKEDIN_QUERY_EXPANSION_MIN_CANDIDATES = 14
 # Strict post-filter keywords for final job location validation.
 LINKEDIN_ALLOWED_CITY_KEYWORDS = [
     "hyderabad",
-    "bengaluru",
-    "bangalore",
-    "mumbai",
-    "chennai",
-    "delhi",
-    "new delhi",
-    "gurgaon",
-    "gurugram",
-    "noida",
 ]
 # Role-quality filters before saving to DB.
 LINKEDIN_EXCLUDED_TITLE_KEYWORDS = [
@@ -237,7 +219,7 @@ LINKEDIN_ALLOWED_LEVEL_KEYWORDS = [
     "junior",
 ]
 LINKEDIN_JOB_TYPE = "F" # F=Full-time, C=Contract, P=Part-time, T=Temporary, I=Internship
-LINKEDIN_JOB_POSTING_DATE = "r86400" # r86400=Past 24h, r259200=Past 3 days, r604800=Past week
+LINKEDIN_JOB_POSTING_DATE = "r604800" # Past week, to maximize Hyderabad results.
 LINKEDIN_F_WT = None # Set 1=Onsite, 2=Remote, 3=Hybrid, or None for all
 # Prefilter controls to reduce wasted detail-fetch calls.
 LINKEDIN_PREFILTER_BY_TITLE_BEFORE_DETAILS = False
@@ -245,9 +227,9 @@ LINKEDIN_MIN_CARD_FIT_SCORE = 0
 LINKEDIN_MIN_DETAIL_FIT_SCORE = 0
 LINKEDIN_MIN_SHORTLIST_FIT_SCORE = 0
 # Reject only when the stated minimum required experience is above this value.
-# Examples allowed: 0+, 1+, 2+, 2-3, 2-4, 2-5, 3 years, 3+ years.
-# Examples rejected: 4 years, 4+ years, 5-7 years.
-LINKEDIN_MAX_ALLOWED_MIN_EXPERIENCE_YEARS = 3
+# Keep jobs requiring 0, 1, or 2 years (including "2+ years").
+# Jobs with no explicit experience requirement are also kept for normal scoring.
+LINKEDIN_MAX_ALLOWED_MIN_EXPERIENCE_YEARS = 2
 # Backward-compatible alias for older code paths.
 LINKEDIN_MAX_ALLOWED_EXPERIENCE_YEARS = LINKEDIN_MAX_ALLOWED_MIN_EXPERIENCE_YEARS
 # Use an LLM pass to rank broader LinkedIn card results before detail fetch.
@@ -264,21 +246,21 @@ LINKEDIN_LLM_FINAL_SHORTLIST_CANDIDATE_CAP = 240
 NAUKRI_SEARCH_QUERIES = LINKEDIN_SEARCH_QUERIES
 NAUKRI_EXPANDED_SEARCH_QUERIES = LINKEDIN_EXPANDED_SEARCH_QUERIES
 NAUKRI_LOCATIONS = LINKEDIN_LOCATIONS
-NAUKRI_BROAD_LOCATIONS = ["India"]
+NAUKRI_BROAD_LOCATIONS = []
 NAUKRI_RESULTS_PER_PAGE = 20
-NAUKRI_MAX_PAGES_PER_QUERY = 2
-NAUKRI_FRESHNESS_DAYS = 1
+NAUKRI_MAX_PAGES_PER_QUERY = 5
+NAUKRI_FRESHNESS_DAYS = 7
 
 INDEED_INDIA_SEARCH_QUERIES = LINKEDIN_SEARCH_QUERIES
 INDEED_INDIA_LOCATIONS = LINKEDIN_LOCATIONS
 
 SCRAPER_SOURCE_CANDIDATE_LIMITS = {
-    "linkedin": 400,
-    "naukri": 150,
+    "linkedin": 500,
+    "naukri": 500,
 }
 SCRAPER_SOURCE_CITY_CANDIDATE_LIMITS = {
-    "linkedin": 300,
-    "naukri": 100,
+    "linkedin": 500,
+    "naukri": 500,
 }
 SCRAPER_SOURCE_FINAL_CAPS = {}
 SCRAPER_ENFORCE_STRICT_SOURCE_CAPS = False
@@ -305,8 +287,8 @@ RESUME_GENERATION_SAFETY_CAP = 50
 # Example: set to 20 for "top 20%" of currently eligible scored jobs.
 JOBS_TO_CUSTOMIZE_TOP_PERCENT = 0
 MAX_JOBS_PER_SEARCH = {
-    "linkedin": 50,
-    "naukri": 20,
+    "linkedin": 100,
+    "naukri": 100,
     "indeed_india": 20,
     "careers_future": 10,
 }

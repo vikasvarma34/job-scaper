@@ -16,6 +16,17 @@ TRANSIENT_JOB_FIELDS = {
     "local_fit_score",
 }
 
+NOT_AVAILABLE_COMPACT_FIELDS = {
+    "description": None,
+    "level": None,
+    "resume_score": None,
+    "experience_required": None,
+    "notes": None,
+    "is_interested": None,
+    "customized_resume_id": None,
+    "contact_email_override": None,
+}
+
 
 def _sanitize_job_payload_for_supabase(job: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """
@@ -628,7 +639,7 @@ def update_job_contact_email_override(job_id: str, email_override: str | None) -
 
 def mark_jobs_as_not_available(job_ids: list[str]) -> tuple[int, int]:
     """
-    Marks jobs as not available so they are excluded from future scoring/generation.
+    Marks jobs as not available and reduces them to lightweight duplicate tombstones.
     """
     cleaned_ids = [str(j).strip() for j in (job_ids or []) if str(j).strip()]
     if not cleaned_ids:
@@ -643,6 +654,7 @@ def mark_jobs_as_not_available(job_ids: list[str]) -> tuple[int, int]:
                     "status": "not_available",
                     "job_state": "not_available",
                     "is_active": False,
+                    **NOT_AVAILABLE_COMPACT_FIELDS,
                 }
             )
             .in_("job_id", cleaned_ids)
