@@ -51,8 +51,8 @@
           "period": "Aug 2025 – Feb 2026",
           "bullets": [
             "Joined as backend engineer when the product had ~100 active doctors; over six months, the platform scaled to 250+ doctors across Toronto clinics on the back of the work below.",
-            "Replaced AWS Transcribe with Soniox for live streaming transcription. Ran both providers in parallel behind a per-doctor setting for ~3 months before phasing AWS out — cost dropped from ~$1.00/hr to ~$0.10/hr, and the product picked up French, Spanish, Hindi, Urdu, and 40+ other languages it couldn't handle before.",
-            "Halved AI note-generation time (~60s → ~20–30s) by cutting redundant backend steps and tightening regex post-processing. Added token streaming on top, so doctors see the note appear live as it's generated rather than waiting on the full response.",
+            "Replaced AWS Transcribe with Soniox for live streaming, ran both providers in parallel for ~3 months, cut cost from ~$1.00/hr to ~$0.10/hr, and added support for 40+ languages.",
+            "Cut AI note-generation time from ~60s to ~20–30s by removing redundant backend steps and optimizing regex post-processing; added token streaming for live note rendering.",
             "Led the security pass toward HIPAA-aligned workflows: added JWT-based service auth and OAuth 2.0 sign-in on top of password login, encrypted notes and audio at rest, and added per-endpoint rate limiting to stop subscription sharing across devices.",
             "Integrated Recall.ai for virtual sessions on Google Meet, Zoom, Teams, and Webex: continuous transcript chunks coming in via webhook, handled with ordering and retry logic, then pushed to the frontend over WebSockets for live UI rendering.",
             "Built an external integration product so partner companies could embed transcription and note generation under their own brand — separate API surface, dashboard for API-key issuance, usage tracked by hours and notes for billing, and developer documentation with sample code.",
@@ -63,8 +63,8 @@
           "project": "TELUS Marketplace — IoT marketplace for enterprise customers",
           "period": "Aug 2024 – Aug 2025",
           "bullets": [
-            "Owned the GraphQL signup endpoint on the marketplace login service: orchestrated writes across multiple downstream Java/Spring Boot microservices (org creation, customer + billing addresses, password hashing, terms-acceptance branching) plus the email-confirmation flow, including cross-service error coordination.",
-            "On the Kafka-consumer email-notifications microservice (Java/Spring Boot): built a generic email-template API that other teams across the project reused instead of duplicating the logic in their own services, plus added new notification types and fixed templating bugs.",
+            "Owned the GraphQL signup endpoint, coordinating organization, customer, billing, password, terms, and email-confirmation flows across Java/Spring Boot microservices with cross-service error handling.",
+            "Built a reusable email-template API in a Java/Spring Boot Kafka consumer, added notification types, and fixed templating issues for multiple teams.",
             "Wrote Go + GraphQL resolvers in the BFF middleware layer between the React frontend and Java microservices — aggregating across multiple backend endpoints and shaping responses to expose only the fields the frontend actually needed. First production Go work, code reviewed by senior TELUS engineers before every staging push."
           ]
         },
@@ -73,10 +73,10 @@
           "period": "Feb 2024 – Aug 2024",
           "bullets": [
             "Sole backend developer (no senior engineer above me) on a Node.js/MongoDB platform for pre-visit questionnaires — PHQ-9, GAD-7, OCD, substance-use, plus custom forms — sent to patients before their first appointment.",
-            "Designed the data model and runtime rule engine for a configurable form builder: question types (single-choice, multi-choice, text), answer-based branching (\"if answer is X, jump to question 5\"), and per-form scoring — all stored as data so the University admin could add or edit forms through the UI without code changes.",
+            "Designed a configurable form engine with multiple question types, answer-based branching, and scoring so administrators could manage forms without code changes.",
             "Made the patient flow passwordless: unique per-assessment link in email, server-side state keyed to the link, so patients could pause mid-questionnaire and resume on another device without ever logging in.",
             "Integrated OpenAI for end-of-assessment clinical summaries: JSON-schema structured output, per-form prompts, configurable summary length per doctor, plus failure handling for rate limits, malformed responses, and timeouts. Summaries stored with per-doctor retention policies (1 / 7 / 30 / 60 / 90 days).",
-            "Wrote the patient-facing React UI as a generic form renderer driven entirely by backend config — so any admin-added form rendered correctly without a UI change — plus the doctor dashboard backend (form assignment, response viewing, summary editing) and the University admin backend."
+            "Built the patient-facing React UI as a backend-configured form renderer, plus backend flows for doctor assignments, response review, summary editing, and University administration."
           ]
         }
       ]
