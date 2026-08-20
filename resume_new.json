@@ -24,12 +24,12 @@
       "company": "Sri Sai Educational Society",
       "location": "Kodad, India",
       "title": "Full Stack Developer – AI & Web Applications",
-      "start_date": "Mar 2026",
+      "start_date": "May 2026",
       "end_date": "Present",
       "project_blocks": [
         {
           "project": "Institution Digital Systems — Website, Email, and College Portal",
-          "period": "Mar 2026 – Present",
+          "period": "May 2026 – Present",
           "bullets": [
             "Leading the redesign of the institution website and cleanup of its domain and official email setup, reorganizing public content and building reusable React components for academic, admissions, and institutional updates.",
             "Architecting a role-based college portal with 1 shared sign-in and 3 tailored experiences for students, faculty, and administrators, using React with 2 backend service stacks: Node.js/Express.js with TypeScript and Java/Spring Boot.",
