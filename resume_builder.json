@@ -1,0 +1,94 @@
+{
+    "name": "Vikas Varma Pokala",
+    "title": "Software Engineer | Full Stack",
+    "email": "vikaspokala96@gmail.com",
+    "phone": "+919704174737",
+    "location": "Hyderabad, India",
+    "links": {
+        "linkedin": "https://linkedin.com/in/vikas-pokala-ab0038291",
+        "github": "",
+        "portfolio": ""
+    },
+    "summary": "Software engineer with 2+ years of production experience building backend and full-stack systems across healthcare and enterprise platforms. Experienced with Java/Spring Boot, Node.js/TypeScript, Go, React, GraphQL, Kafka, and real-time systems, with work spanning products used by 250+ doctors, a healthcare platform used at the University of Toronto, and TELUS Marketplace.",
+    "skills": {
+        "Languages": "Java, TypeScript, JavaScript, Go",
+        "Backend": "Spring Boot, Node.js, Express.js, REST APIs, GraphQL, Kafka consumers, WebSockets, Microservices",
+        "Databases": "MongoDB, MySQL, Oracle, Firestore",
+        "Cloud / DevOps": "AWS (S3, KMS, CloudWatch), GCP, Docker, Firebase",
+        "Auth & Security": "JWT, OAuth 2.0, Firebase Auth, encryption at rest, rate limiting",
+        "Frontend": "React",
+        "AI Integrations": "OpenAI, RAG, Pinecone, Soniox, Recall.ai"
+    },
+    "experience": [
+        {
+            "company": "Sri Sai Educational Society",
+            "location": "Kodad, India",
+            "title": "Full Stack Developer – AI & Web Applications",
+            "start_date": "Jul 2026",
+            "end_date": "Present",
+            "project_blocks": [
+                {
+                    "project": "Institution Digital Systems — Website, Email, and College Portal",
+                    "period": "Jul 2026 – Present",
+                    "bullets": [
+                        "Architecting and building a role-based college portal with shared sign-in for students, faculty, and administrators using React, Node.js/Express with TypeScript, and Java/Spring Boot; implementing attendance workflows for user mapping, daily entry, corrections, permission checks, and administrative review.",
+                        "Building backend services around 12-factor principles, including environment-based configuration, stateless API processes, clear service boundaries, and deployment-ready application design to improve maintainability and operational consistency.",
+                        "Building custom AI agents and internal workflow tools for college operations, including accounting, reception, and administrative processes, while also modernizing the institution website, domain, and official email systems."
+                    ]
+                }
+            ]
+        },
+        {
+            "company": "Markitech AI",
+            "location": "Toronto, Canada",
+            "title": "Full Stack Developer",
+            "start_date": "Feb 2024",
+            "end_date": "Feb 2026",
+            "project_blocks": [
+                {
+                    "project": "CliniScripts — Clinical Documentation Platform",
+                    "period": "Aug 2025 – Feb 2026",
+                    "bullets": [
+                        "Joined as backend engineer when the product had ~100 active doctors; over six months, the platform scaled to 250+ doctors across Toronto clinics on the back of the work below.",
+                        "Replaced AWS Transcribe with Soniox for live transcription, ran both providers in parallel for ~3 months, reduced transcription cost from ~$1.00/hr to ~$0.10/hr, and added support for 40+ languages.",
+                        "Reduced AI note-generation time from ~60s to ~20–30s by removing redundant backend steps and optimizing regex post-processing; added token streaming for progressive note rendering.",
+                        "Implemented JWT-based service authentication, OAuth 2.0 sign-in, encryption at rest for notes and audio, and per-endpoint rate limiting as part of a broader security hardening effort for HIPAA-aligned workflows.",
+                        "Integrated Recall.ai for Google Meet, Zoom, Teams, and Webex sessions, processing continuous transcript chunks via webhooks with ordering and retry handling, then streaming updates to the frontend over WebSockets.",
+                        "Built a partner-facing transcription and note-generation platform with a separate API surface, API-key management dashboard, usage tracking by hours and notes for billing, and developer documentation with sample code."
+                    ]
+                },
+                {
+                    "project": "TELUS Marketplace — IoT Marketplace",
+                    "period": "Aug 2024 – Aug 2025",
+                    "bullets": [
+                        "Owned the GraphQL signup flow coordinating organization, customer, billing, password, terms, and email-confirmation processes across Java/Spring Boot microservices with cross-service error handling.",
+                        "Built a reusable email-template API in a Java/Spring Boot Kafka consumer, added new notification types, and resolved templating issues used across multiple teams.",
+                        "Developed Go + GraphQL resolvers in the BFF layer between the React frontend and Java microservices, aggregating backend responses and exposing only the fields required by the frontend."
+                    ]
+                },
+                {
+                    "project": "CliniAssess — Pre-Visit Assessment Platform",
+                    "period": "Feb 2024 – Aug 2024",
+                    "bullets": [
+                        "Served as the sole backend developer for a Node.js/MongoDB pre-visit assessment platform used by 30+ doctors at the University of Toronto, while also building the patient-facing React experience.",
+                        "Designed a configurable form engine supporting multiple question types, answer-based branching, and scoring, allowing administrators to manage assessments without code changes.",
+                        "Built a passwordless assessment flow using unique email links and server-side state, allowing patients to pause questionnaires and resume on another device without creating an account.",
+                        "Integrated OpenAI for structured clinical summaries with per-form prompts, configurable summary length, failure handling for rate limits, malformed responses, and timeouts, plus per-doctor retention policies."
+                    ]
+                }
+            ]
+        }
+    ],
+    "education": [
+        {
+            "degree": "Postgraduate Diploma, Quality Engineering Management",
+            "institution": "Lambton College, Sarnia, Canada",
+            "period": "Sep 2021 – May 2023"
+        },
+        {
+            "degree": "B.Tech, Mechanical Engineering",
+            "institution": "National Institute of Technology, Warangal",
+            "period": "Aug 2016 – Aug 2020"
+        }
+    ]
+}

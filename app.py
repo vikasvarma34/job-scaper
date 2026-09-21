@@ -1,5 +1,6 @@
 import io
 import json
+import logging
 import os
 import re
 import subprocess
@@ -51,6 +52,8 @@ DASHBOARD_JOB_COLUMNS = ",".join(
 
 app = Flask(__name__)
 app.config["SECRET_KEY"] = os.environ.get("FLASK_SECRET_KEY", "job-scraper-dashboard")
+app.json.sort_keys = False
+app.config["JSON_SORT_KEYS"] = False
 
 
 @app.before_request
@@ -1260,6 +1263,172 @@ def run_action():
     if request.accept_mimetypes.best == "application/json":
         return jsonify({"ok": True})
     return redirect(url_for("index"))
+
+
+# --- Dedicated Resume Builder Endpoints ---
+
+@app.get("/builder")
+def resume_builder_page():
+    """
+    Renders the dedicated Resume Builder interface.
+    """
+    return render_template("resume_builder.html")
+
+
+@app.get("/api/builder/base")
+def api_builder_get_base():
+    """
+    Loads and returns the default base resume JSON from the configured file path.
+    Prioritizes resume_builder.json and prevents browser caching so resets always reload disk data.
+    """
+    candidates = [
+        getattr(config, "BASE_RESUME_PATH", None),
+        "resume_builder.json",
+        "resume_new_google.json",
+        "resume_new.json",
+        "resume.json",
+    ]
+    resume_path = None
+    for candidate in candidates:
+        if candidate and os.path.exists(candidate):
+            resume_path = candidate
+            break
+
+    if not resume_path:
+        return jsonify({"ok": False, "error": "Base resume file not found."}), 404
+
+    try:
+        with open(resume_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        resp = jsonify({"ok": True, "resume": data, "path": resume_path})
+        resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        resp.headers["Pragma"] = "no-cache"
+        return resp
+    except Exception as exc:
+        logging.error(f"Failed to read base resume file {resume_path}: {exc}", exc_info=True)
+        return jsonify({"ok": False, "error": f"Failed to read base resume file: {exc}"}), 500
+
+
+@app.post("/api/builder/pdf")
+def api_builder_generate_pdf():
+    """
+    Receives custom resume JSON data and returns an on-the-fly generated PDF.
+    Does not save anything to the database or storage.
+    """
+    body = request.get_json(silent=True) or {}
+    resume_data = body.get("resume_data")
+    if not resume_data or not isinstance(resume_data, dict):
+        return jsonify({"ok": False, "error": "Missing or invalid 'resume_data' object."}), 400
+
+    file_name = str(body.get("file_name") or "").strip()
+    if not file_name:
+        company = str(body.get("company_name") or "").strip()
+        candidate_name = str(resume_data.get("name") or "Resume").strip()
+        slug_name = _sanitize_filename_token(candidate_name, default="Resume")
+        if company:
+            slug_company = _sanitize_filename_token(company, default="COMPANY")
+            file_name = f"{slug_name}_{slug_company}_Resume.pdf"
+        else:
+            file_name = f"{slug_name}_Resume.pdf"
+
+    if not file_name.lower().endswith(".pdf"):
+        file_name += ".pdf"
+
+    preview_mode = request.args.get("preview") == "true" or bool(body.get("preview"))
+    top_margin = body.get("top_margin")
+    bottom_margin = body.get("bottom_margin")
+    side_margin = body.get("side_margin")
+    font_size = body.get("font_size")
+    try:
+        parsed_resume = parse_resume_data(resume_data)
+        pdf_bytes = pdf_generator.create_resume_pdf(
+            parsed_resume,
+            top_margin=top_margin,
+            bottom_margin=bottom_margin,
+            side_margin=side_margin,
+            font_size=font_size,
+        )
+    except Exception as exc:
+        logging.error(f"Failed to generate PDF from builder payload: {exc}", exc_info=True)
+        return jsonify({"ok": False, "error": f"PDF Generation Error: {exc}"}), 400
+
+    return send_file(
+        io.BytesIO(pdf_bytes),
+        mimetype="application/pdf",
+        as_attachment=not preview_mode,
+        download_name=file_name,
+    )
+
+
+@app.post("/api/builder/save")
+def api_builder_save_resume():
+    """
+    Persists custom resume JSON data into the 'saved_resumes' table.
+    """
+    body = request.get_json(silent=True) or {}
+    company_name = str(body.get("company_name") or "").strip()
+    file_name = str(body.get("file_name") or "").strip()
+    resume_data = body.get("resume_data")
+    resume_id = body.get("id") or None
+
+    if not company_name:
+        return jsonify({"ok": False, "error": "Company name is required."}), 400
+    if not file_name:
+        return jsonify({"ok": False, "error": "File name is required."}), 400
+    if not resume_data or not isinstance(resume_data, dict):
+        return jsonify({"ok": False, "error": "Missing or invalid 'resume_data' object."}), 400
+
+    try:
+        # Validate data against resume model
+        parse_resume_data(resume_data)
+    except Exception as exc:
+        return jsonify({"ok": False, "error": f"Invalid resume JSON structure: {exc}"}), 400
+
+    saved = supabase_utils.save_custom_resume(
+        company_name=company_name,
+        file_name=file_name,
+        resume_data=resume_data,
+        resume_id=resume_id,
+    )
+
+    if not saved:
+        return jsonify({
+            "ok": False,
+            "error": "Failed to save resume in Supabase. Check database logs or ensure table 'saved_resumes' exists.",
+        }), 500
+
+    return jsonify({"ok": True, "saved": saved})
+
+
+@app.get("/api/builder/resumes")
+def api_builder_list_resumes():
+    """
+    Returns list of saved resumes with metadata (id, company, file_name, timestamps).
+    """
+    resumes = supabase_utils.list_saved_resumes()
+    return jsonify({"ok": True, "resumes": resumes})
+
+
+@app.get("/api/builder/resumes/<resume_id>")
+def api_builder_get_saved_resume(resume_id: str):
+    """
+    Fetches the full resume data for a previously saved resume.
+    """
+    resume = supabase_utils.get_saved_resume(resume_id)
+    if not resume:
+        return jsonify({"ok": False, "error": "Saved resume not found."}), 404
+    return jsonify({"ok": True, "resume": resume})
+
+
+@app.delete("/api/builder/resumes/<resume_id>")
+def api_builder_delete_saved_resume(resume_id: str):
+    """
+    Deletes a saved resume from the database.
+    """
+    success = supabase_utils.delete_saved_resume(resume_id)
+    if not success:
+        return jsonify({"ok": False, "error": "Failed to delete saved resume."}), 500
+    return jsonify({"ok": True})
 
 
 if __name__ == "__main__":

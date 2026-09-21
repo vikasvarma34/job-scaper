@@ -69,6 +69,100 @@ def _register_arial_fonts() -> tuple[str, str]:
     return regular_font, bold_font
 
 
+MONTH_ABBR_MAP = {
+    "january": "Jan", "jan": "Jan",
+    "february": "Feb", "feb": "Feb",
+    "march": "Mar", "mar": "Mar",
+    "april": "Apr", "apr": "Apr",
+    "may": "May",
+    "june": "Jun", "jun": "Jun",
+    "july": "Jul", "jul": "Jul",
+    "august": "Aug", "aug": "Aug",
+    "september": "Sep", "sep": "Sep", "sept": "Sep",
+    "october": "Oct", "oct": "Oct",
+    "november": "Nov", "nov": "Nov",
+    "december": "Dec", "dec": "Dec",
+}
+
+
+def _normalize_date_token(token: str) -> str:
+    cleaned = token.strip()
+    if not cleaned:
+        return ""
+    if cleaned.lower() in ("present", "current", "now"):
+        return "Present"
+
+    m = re.match(r"^([A-Za-z]+)\.?,?\s*(\d{4})$", cleaned)
+    if m:
+        month_str, year = m.group(1).lower(), m.group(2)
+        abbr = MONTH_ABBR_MAP.get(month_str, month_str.capitalize()[:3])
+        return f"{abbr} {year}"
+
+    m = re.match(r"^(\d{4})[-/](\d{1,2})$", cleaned)
+    if m:
+        year, month_num = m.group(1), int(m.group(2))
+        months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+        if 1 <= month_num <= 12:
+            return f"{months[month_num - 1]} {year}"
+        return cleaned
+
+    m = re.match(r"^(\d{1,2})[-/](\d{4})$", cleaned)
+    if m:
+        month_num, year = int(m.group(1)), m.group(2)
+        months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+        if 1 <= month_num <= 12:
+            return f"{months[month_num - 1]} {year}"
+        return cleaned
+
+    return cleaned
+
+
+def _format_date_range(start: str | None, end: str | None = None) -> str:
+    start_str = _safe_text(start)
+    end_str = _safe_text(end)
+
+    if not start_str and not end_str:
+        return ""
+
+    if start_str and not end_str:
+        parts = re.split(r"\s*[–—\-]\s*", start_str, maxsplit=1)
+        if len(parts) == 2:
+            s_clean = _normalize_date_token(parts[0])
+            e_clean = _normalize_date_token(parts[1])
+            if s_clean and e_clean:
+                return f"{s_clean} – {e_clean}"
+            return s_clean or e_clean
+        return _normalize_date_token(start_str)
+
+    s_clean = _normalize_date_token(start_str)
+    e_clean = _normalize_date_token(end_str)
+
+    if s_clean and e_clean:
+        return f"{s_clean} – {e_clean}"
+    elif s_clean:
+        return f"{s_clean} – Present"
+    elif e_clean:
+        return e_clean
+    return ""
+
+
+def _clean_project_title(title: str | None) -> str:
+    cleaned = _safe_text(title)
+    if not cleaned:
+        return ""
+    lower = cleaned.lower()
+    if lower.startswith("cliniscripts"):
+        return "CliniScripts — Clinical Documentation Platform"
+    if lower.startswith("telus marketplace"):
+        return "TELUS Marketplace — IoT Marketplace"
+    if lower.startswith("cliniassess"):
+        return "CliniAssess — Pre-Visit Assessment Platform"
+
+    cleaned = re.sub(r",\s*used (?:by|at)\s+.*$", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s*[-–—]\s*", " — ", cleaned, count=1)
+    return cleaned
+
+
 def _safe_text(value: str | None) -> str:
     text = str(value or "").strip()
     if not text or text == "NA":
@@ -102,9 +196,9 @@ def _append_bullet_lines(
     bullet_lines = _safe_multiline_text(text) or [_safe_text(text)]
 
     for bullet in bullet_lines:
-        clean_bullet = bullet.lstrip("-*•· ").strip()
+        clean_bullet = bullet.lstrip("-*•·●▪◦ ").strip()
         if clean_bullet:
-            target_story.append(Paragraph(f"- {escape(clean_bullet)}", style_bullet))
+            target_story.append(Paragraph(f"&bull; {escape(clean_bullet)}", style_bullet))
 
 
 def _append_section_heading(
@@ -122,6 +216,7 @@ def _append_left_right_line(
     left_style: ParagraphStyle,
     right_style: ParagraphStyle,
     width: float,
+    col_ratio: float = 0.72,
 ) -> None:
     clean_left = _safe_text(left_text)
     clean_right = _safe_text(right_text)
@@ -141,7 +236,7 @@ def _append_left_right_line(
                 Paragraph(escape(clean_right), right_style),
             ]
         ],
-        colWidths=[width * 0.68, width * 0.32],
+        colWidths=[width * col_ratio, width * (1.0 - col_ratio)],
         hAlign="LEFT",
     )
     table.setStyle(
@@ -183,29 +278,47 @@ def _append_skill_lines(
             target_story.append(Paragraph(escape(skill), style_skill_line))
 
 
-def create_resume_pdf(resume_data: ResumeLike, header_title: str | None = None) -> bytes:
+def create_resume_pdf(
+    resume_data: ResumeLike,
+    header_title: str | None = None,
+    top_margin: float | None = None,
+    bottom_margin: float | None = None,
+    side_margin: float | None = None,
+    font_size: float | None = None,
+    section_order: list[str] | None = None,
+) -> bytes:
     """
     Generate a strict ATS-first, single-column, text-based PDF resume.
+    Supports customizable margins, base font sizes, and flexible section ordering.
     """
     buffer = io.BytesIO()
+
+    # Margins in inches (default 0.45 top/bottom, 0.55 sides)
+    tm = float(top_margin) if top_margin is not None else 0.45
+    bm = float(bottom_margin) if bottom_margin is not None else 0.45
+    sm = float(side_margin) if side_margin is not None else 0.55
+
     doc = SimpleDocTemplate(
         buffer,
         pagesize=letter,
-        leftMargin=0.55 * inch,
-        rightMargin=0.55 * inch,
-        topMargin=0.45 * inch,
-        bottomMargin=0.45 * inch,
+        leftMargin=sm * inch,
+        rightMargin=sm * inch,
+        topMargin=tm * inch,
+        bottomMargin=bm * inch,
     )
 
     styles = getSampleStyleSheet()
     regular_font, bold_font = _register_arial_fonts()
 
+    base_size = float(font_size) if font_size is not None else 12.0
+    base_leading = base_size + 2.0
+
     style_name = ParagraphStyle(
         name="Name",
         parent=styles["Heading1"],
         fontName=bold_font,
-        fontSize=18,
-        leading=21,
+        fontSize=base_size + 6.0,
+        leading=base_size + 9.0,
         alignment=TA_LEFT,
         spaceAfter=4,
     )
@@ -213,8 +326,8 @@ def create_resume_pdf(resume_data: ResumeLike, header_title: str | None = None) 
         name="HeaderTitle",
         parent=styles["Normal"],
         fontName=bold_font,
-        fontSize=13,
-        leading=15,
+        fontSize=base_size + 1.0,
+        leading=base_size + 3.0,
         alignment=TA_LEFT,
         spaceAfter=4,
     )
@@ -222,8 +335,8 @@ def create_resume_pdf(resume_data: ResumeLike, header_title: str | None = None) 
         name="Contact",
         parent=styles["Normal"],
         fontName=regular_font,
-        fontSize=12,
-        leading=14,
+        fontSize=base_size,
+        leading=base_leading,
         alignment=TA_LEFT,
         spaceAfter=2,
     )
@@ -231,8 +344,8 @@ def create_resume_pdf(resume_data: ResumeLike, header_title: str | None = None) 
         name="SectionHeading",
         parent=styles["Heading2"],
         fontName=bold_font,
-        fontSize=13,
-        leading=15,
+        fontSize=base_size + 1.0,
+        leading=base_size + 3.0,
         alignment=TA_LEFT,
         spaceBefore=6,
         spaceAfter=2,
@@ -241,10 +354,54 @@ def create_resume_pdf(resume_data: ResumeLike, header_title: str | None = None) 
         name="Body",
         parent=styles["Normal"],
         fontName=regular_font,
-        fontSize=12,
-        leading=14,
+        fontSize=base_size,
+        leading=base_leading,
         alignment=TA_LEFT,
         spaceAfter=2,
+    )
+    style_exp_company = ParagraphStyle(
+        name="ExpCompany",
+        parent=styles["Normal"],
+        fontName=bold_font,
+        fontSize=base_size + 0.5,
+        leading=base_size + 2.5,
+        alignment=TA_LEFT,
+    )
+    style_exp_company_date = ParagraphStyle(
+        name="ExpCompanyDate",
+        parent=styles["Normal"],
+        fontName=bold_font,
+        fontSize=base_size,
+        leading=base_size + 2.5,
+        alignment=TA_RIGHT,
+    )
+    style_exp_role_loc = ParagraphStyle(
+        name="ExpRoleLoc",
+        parent=styles["Normal"],
+        fontName=regular_font,
+        fontSize=base_size,
+        leading=base_size + 2.0,
+        alignment=TA_LEFT,
+        textColor="#334155",
+        spaceBefore=1,
+        spaceAfter=3,
+    )
+    style_exp_project = ParagraphStyle(
+        name="ExpProject",
+        parent=styles["Normal"],
+        fontName=bold_font,
+        fontSize=base_size - 0.5,
+        leading=base_size + 1.5,
+        alignment=TA_LEFT,
+    )
+    style_exp_project_date = ParagraphStyle(
+        name="ExpProjectDate",
+        parent=styles["Normal"],
+        fontName=regular_font,
+        fontSize=base_size - 0.5,
+        leading=base_size + 1.5,
+        alignment=TA_RIGHT,
+        textColor="#475569",
     )
     style_role = ParagraphStyle(
         name="Role",
@@ -265,8 +422,8 @@ def create_resume_pdf(resume_data: ResumeLike, header_title: str | None = None) 
     style_bullet = ParagraphStyle(
         name="Bullet",
         parent=style_body,
-        leftIndent=12,
-        firstLineIndent=0,
+        leftIndent=14,
+        firstLineIndent=-10,
         spaceAfter=2,
     )
 
@@ -302,116 +459,124 @@ def create_resume_pdf(resume_data: ResumeLike, header_title: str | None = None) 
     if link_parts:
         story.append(Paragraph(escape(" | ".join(link_parts)), style_contact))
 
-    summary_text = _safe_text(resume_data.summary)
-    if summary_text:
-        _append_section_heading(
-            story,
-            "SUMMARY" if is_v2_resume else "PROFESSIONAL SUMMARY",
-            style_section_heading,
-        )
-        story.append(Paragraph(escape(summary_text), style_body))
+    # --- Section Renderers ---
+    def render_summary():
+        summary_text = _safe_text(resume_data.summary)
+        if summary_text:
+            _append_section_heading(
+                story,
+                "SUMMARY" if is_v2_resume else "PROFESSIONAL SUMMARY",
+                style_section_heading,
+            )
+            story.append(Paragraph(escape(summary_text), style_body))
 
-    if isinstance(resume_data.skills, dict):
-        cleaned_skills = [
-            f"{_safe_text(str(label))}: {_safe_text(str(values))}"
-            for label, values in resume_data.skills.items()
-            if _safe_text(str(label)) and _safe_text(str(values))
-        ]
-    else:
-        cleaned_skills = [_safe_text(skill) for skill in resume_data.skills if _safe_text(skill)]
-    if cleaned_skills:
-        _append_section_heading(story, "SKILLS" if is_v2_resume else "TECHNICAL SKILLS", style_section_heading)
-        _append_skill_lines(story, resume_data.skills, style_body)
+    def render_skills():
+        if isinstance(resume_data.skills, dict):
+            cleaned_skills = [
+                f"{_safe_text(str(label))}: {_safe_text(str(values))}"
+                for label, values in resume_data.skills.items()
+                if _safe_text(str(label)) and _safe_text(str(values))
+            ]
+        else:
+            cleaned_skills = [_safe_text(skill) for skill in resume_data.skills if _safe_text(skill)]
+        if cleaned_skills:
+            _append_section_heading(story, "SKILLS" if is_v2_resume else "TECHNICAL SKILLS", style_section_heading)
+            _append_skill_lines(story, resume_data.skills, style_body)
 
-    if resume_data.experience:
+    def render_experience():
+        if not resume_data.experience:
+            return
         _append_section_heading(
             story,
             "EXPERIENCE" if is_v2_resume else "PROFESSIONAL EXPERIENCE",
             style_section_heading,
         )
         for exp in resume_data.experience:
-            if is_v2_resume:
-                if _safe_text(exp.title):
-                    story.append(Paragraph(escape(_safe_text(exp.title)), style_role))
-                dates = ""
-                if _safe_text(exp.start_date) and _safe_text(exp.end_date):
-                    dates = f"{_safe_text(exp.start_date)} - {_safe_text(exp.end_date)}"
-                elif _safe_text(exp.start_date):
-                    dates = f"{_safe_text(exp.start_date)} - Present"
-                elif _safe_text(exp.end_date):
-                    dates = _safe_text(exp.end_date)
+            comp_name = _safe_text(exp.company)
+            comp_dates = _format_date_range(exp.start_date, exp.end_date)
+            role_title = _safe_text(getattr(exp, "title", None) or getattr(exp, "job_title", None))
+            loc = _safe_text(exp.location)
 
-                company_meta_parts = [
-                    _safe_text(exp.company),
-                    _safe_text(exp.location),
-                    dates,
-                ]
-                company_meta = " | ".join(part for part in company_meta_parts if part)
-                if company_meta:
-                    story.append(Paragraph(escape(company_meta), style_meta))
-
-                for block in exp.project_blocks:
-                    project_name = _safe_text(block.project)
-                    period = _safe_text(block.period)
-                    if project_name or period:
-                        project_heading = " - ".join(part for part in [project_name, period] if part)
-                        story.append(Paragraph(escape(project_heading), style_role))
-                    for bullet in block.bullets:
-                        _append_bullet_lines(story, str(bullet), style_bullet)
-                story.append(Spacer(1, 0.04 * inch))
-                continue
-
-            if _safe_text(exp.job_title):
-                story.append(Paragraph(escape(_safe_text(exp.job_title)), style_role))
-
-            company_location_parts = [
-                _safe_text(exp.company),
-                _safe_text(exp.location),
-            ]
-            company_location = " | ".join(part for part in company_location_parts if part)
-            dates = ""
-            if _safe_text(exp.start_date) and _safe_text(exp.end_date):
-                dates = f"{_safe_text(exp.start_date)} - {_safe_text(exp.end_date)}"
-            elif _safe_text(exp.start_date):
-                dates = f"{_safe_text(exp.start_date)} - Present"
-            elif _safe_text(exp.end_date):
-                dates = _safe_text(exp.end_date)
-            _append_left_right_line(
-                story,
-                company_location,
-                dates,
-                style_meta,
-                style_meta_right,
-                content_width,
-            )
-
-            _append_bullet_lines(story, exp.description, style_bullet)
-            story.append(Spacer(1, 0.04 * inch))
-
-    if not is_v2_resume and resume_data.projects:
-        _append_section_heading(story, "PROJECTS", style_section_heading)
-        for project in resume_data.projects:
-            project_name = _safe_text(project.name)
-            if project_name:
-                story.append(Paragraph(escape(project_name), style_role))
-
-            _append_bullet_lines(story, project.description, style_bullet)
-
-            technologies = [
-                _safe_text(technology)
-                for technology in (project.technologies or [])
-                if _safe_text(technology)
-            ]
-            if technologies:
-                story.append(
-                    Paragraph(
-                        f"<b>Technologies:</b> {escape(', '.join(technologies))}",
-                        style_body,
-                    )
+            # 1. Company Name + Employment Dates
+            if comp_name or comp_dates:
+                _append_left_right_line(
+                    story,
+                    comp_name,
+                    comp_dates,
+                    style_exp_company,
+                    style_exp_company_date,
+                    content_width,
+                    col_ratio=0.72,
                 )
-            story.append(Spacer(1, 0.04 * inch))
 
-    if resume_data.education:
+            # 2. Job Title + Location directly underneath
+            role_loc_parts = [role_title, loc]
+            role_loc_parts = [p for p in role_loc_parts if p]
+            if role_loc_parts:
+                role_loc_str = " · ".join(role_loc_parts)
+                story.append(Paragraph(escape(role_loc_str), style_exp_role_loc))
+
+            # 3. Project blocks & achievements
+            if is_v2_resume and getattr(exp, "project_blocks", None):
+                for block in exp.project_blocks:
+                    proj_name = _clean_project_title(block.project)
+                    proj_dates = _format_date_range(block.period)
+
+                    # Avoid duplicate identical dates
+                    show_proj_dates = bool(
+                        proj_dates and proj_dates.strip() != comp_dates.strip()
+                    )
+
+                    story.append(Spacer(1, 0.02 * inch))
+                    if proj_name or (proj_dates and show_proj_dates):
+                        if show_proj_dates:
+                            _append_left_right_line(
+                                story,
+                                proj_name,
+                                proj_dates,
+                                style_exp_project,
+                                style_exp_project_date,
+                                content_width,
+                                col_ratio=0.72,
+                            )
+                        else:
+                            story.append(Paragraph(escape(proj_name), style_exp_project))
+
+                    for bullet in (block.bullets or []):
+                        _append_bullet_lines(story, str(bullet), style_bullet)
+                story.append(Spacer(1, 0.05 * inch))
+            else:
+                if getattr(exp, "description", None):
+                    _append_bullet_lines(story, exp.description, style_bullet)
+                story.append(Spacer(1, 0.05 * inch))
+
+    def render_projects():
+        if not is_v2_resume and getattr(resume_data, "projects", None):
+            _append_section_heading(story, "PROJECTS", style_section_heading)
+            for project in resume_data.projects:
+                project_name = _safe_text(project.name)
+                if project_name:
+                    story.append(Paragraph(escape(project_name), style_role))
+
+                _append_bullet_lines(story, project.description, style_bullet)
+
+                technologies = [
+                    _safe_text(technology)
+                    for technology in (project.technologies or [])
+                    if _safe_text(technology)
+                ]
+                if technologies:
+                    story.append(
+                        Paragraph(
+                            f"<b>Technologies:</b> {escape(', '.join(technologies))}",
+                            style_body,
+                        )
+                    )
+                story.append(Spacer(1, 0.04 * inch))
+
+    def render_education():
+        if not resume_data.education:
+            return
         _append_section_heading(story, "EDUCATION", style_section_heading)
         for edu in resume_data.education:
             if is_v2_resume:
@@ -420,10 +585,11 @@ def create_resume_pdf(resume_data: ResumeLike, header_title: str | None = None) 
                 _append_left_right_line(
                     story,
                     _safe_text(edu.institution),
-                    _safe_text(edu.period),
+                    _format_date_range(edu.period),
                     style_meta,
                     style_meta_right,
                     content_width,
+                    col_ratio=0.72,
                 )
                 story.append(Spacer(1, 0.04 * inch))
                 continue
@@ -452,28 +618,36 @@ def create_resume_pdf(resume_data: ResumeLike, header_title: str | None = None) 
             )
             story.append(Spacer(1, 0.04 * inch))
 
-    if resume_data.certifications:
-        valid_certs = [
-            cert
-            for cert in resume_data.certifications
-            if _safe_text(cert.name) or _safe_text(cert.issuer)
-        ]
-        if valid_certs:
-            _append_section_heading(story, "CERTIFICATIONS", style_section_heading)
-            for cert in valid_certs:
-                cert_name = _safe_text(cert.name)
-                if cert_name:
-                    story.append(Paragraph(escape(cert_name), style_role))
-                if _safe_text(cert.issuer):
-                    story.append(Paragraph(escape(_safe_text(cert.issuer)), style_meta))
-                if _safe_text(cert.year):
-                    story.append(Paragraph(escape(_safe_text(cert.year)), style_meta))
-                story.append(Spacer(1, 0.04 * inch))
+    def render_certifications():
+        if getattr(resume_data, "certifications", None):
+            valid_certs = [
+                cert
+                for cert in resume_data.certifications
+                if _safe_text(cert.name) or _safe_text(cert.issuer)
+            ]
+            if valid_certs:
+                _append_section_heading(story, "CERTIFICATIONS", style_section_heading)
+                for cert in valid_certs:
+                    cert_name = _safe_text(cert.name)
+                    if cert_name:
+                        story.append(Paragraph(escape(cert_name), style_role))
+                    if _safe_text(cert.issuer):
+                        story.append(Paragraph(escape(_safe_text(cert.issuer)), style_meta))
+                    if _safe_text(cert.year):
+                        story.append(Paragraph(escape(_safe_text(cert.year)), style_meta))
+                    story.append(Spacer(1, 0.04 * inch))
 
-    languages = [_safe_text(language) for language in resume_data.languages if _safe_text(language)]
-    if languages:
-        _append_section_heading(story, "LANGUAGES", style_section_heading)
-        story.append(Paragraph(escape(", ".join(languages)), style_body))
+    # --- Strict Canonical Section Order ---
+    # 1. Summary
+    # 2. Skills
+    # 3. Experience
+    # 4. Education
+    render_summary()
+    render_skills()
+    render_experience()
+    if not is_v2_resume and getattr(resume_data, "projects", None):
+        render_projects()
+    render_education()
 
     try:
         doc.build(story)

@@ -1225,3 +1225,88 @@ def get_base_resume() -> Optional[dict]:
     except Exception as e:
         logging.error(f"Error fetching base resume from Supabase: {e}", exc_info=True)
         return None
+
+
+# --- Custom Saved Resumes (JSON-only) ---
+
+def save_custom_resume(
+    company_name: str,
+    file_name: str,
+    resume_data: dict,
+    resume_id: Optional[str] = None,
+) -> Optional[dict]:
+    """
+    Saves or updates a custom resume purely as JSON in the 'saved_resumes' table.
+    """
+    table_name = getattr(config, "SUPABASE_SAVED_RESUMES_TABLE_NAME", "saved_resumes")
+    payload = {
+        "company_name": company_name.strip(),
+        "file_name": file_name.strip(),
+        "resume_data": resume_data,
+    }
+
+    try:
+        if resume_id:
+            logging.info(f"Updating saved resume {resume_id} in '{table_name}'...")
+            response = supabase.table(table_name).update(payload).eq("id", resume_id).execute()
+        else:
+            logging.info(f"Inserting new custom resume for '{company_name}' in '{table_name}'...")
+            response = supabase.table(table_name).insert(payload).execute()
+
+        if response.data and len(response.data) > 0:
+            logging.info(f"Successfully saved custom resume in '{table_name}'.")
+            return response.data[0]
+        logging.warning(f"Saved resume operation returned no data. Response: {response}")
+        return None
+    except Exception as e:
+        logging.error(f"Error saving custom resume to Supabase: {e}", exc_info=True)
+        return None
+
+
+def list_saved_resumes(limit: int = 50) -> list[dict]:
+    """
+    Returns a list of saved resumes with metadata (id, company_name, file_name, timestamps)
+    ordered from newest to oldest.
+    """
+    table_name = getattr(config, "SUPABASE_SAVED_RESUMES_TABLE_NAME", "saved_resumes")
+    try:
+        response = (
+            supabase.table(table_name)
+            .select("id, company_name, file_name, created_at, updated_at")
+            .order("created_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        return response.data or []
+    except Exception as e:
+        logging.error(f"Error listing saved resumes from Supabase: {e}", exc_info=True)
+        return []
+
+
+def get_saved_resume(resume_id: str) -> Optional[dict]:
+    """
+    Fetches a specific saved resume including its full JSON data.
+    """
+    table_name = getattr(config, "SUPABASE_SAVED_RESUMES_TABLE_NAME", "saved_resumes")
+    try:
+        response = supabase.table(table_name).select("*").eq("id", resume_id).limit(1).execute()
+        if response.data and len(response.data) > 0:
+            return response.data[0]
+        return None
+    except Exception as e:
+        logging.error(f"Error fetching saved resume {resume_id} from Supabase: {e}", exc_info=True)
+        return None
+
+
+def delete_saved_resume(resume_id: str) -> bool:
+    """
+    Deletes a saved resume from the 'saved_resumes' table.
+    """
+    table_name = getattr(config, "SUPABASE_SAVED_RESUMES_TABLE_NAME", "saved_resumes")
+    try:
+        response = supabase.table(table_name).delete().eq("id", resume_id).execute()
+        return bool(response.data and len(response.data) > 0)
+    except Exception as e:
+        logging.error(f"Error deleting saved resume {resume_id} from Supabase: {e}", exc_info=True)
+        return False
+

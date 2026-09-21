@@ -47,7 +47,7 @@
       "end_date": "Feb 2026",
       "project_blocks": [
         {
-          "project": "CliniScripts — clinical documentation product for therapists, used by 250+ doctors",
+          "project": "CliniScripts — Clinical Documentation Platform",
           "period": "Aug 2025 – Feb 2026",
           "bullets": [
             "Joined as backend engineer when the product had ~100 active doctors; over six months, the platform scaled to 250+ doctors across Toronto clinics on the back of the work below.",
@@ -60,7 +60,7 @@
           ]
         },
         {
-          "project": "TELUS Marketplace — IoT marketplace for enterprise customers",
+          "project": "TELUS Marketplace — IoT Marketplace",
           "period": "Aug 2024 – Aug 2025",
           "bullets": [
             "Owned the GraphQL signup endpoint, coordinating organization, customer, billing, password, terms, and email-confirmation flows across Java/Spring Boot microservices with cross-service error handling.",
@@ -69,7 +69,7 @@
           ]
         },
         {
-          "project": "CliniAssess — pre-visit questionnaire platform, used at the University of Toronto by 30+ doctors",
+          "project": "CliniAssess — Pre-Visit Assessment Platform",
           "period": "Feb 2024 – Aug 2024",
           "bullets": [
             "Sole backend developer (no senior engineer above me) on a Node.js/MongoDB platform for pre-visit questionnaires — PHQ-9, GAD-7, OCD, substance-use, plus custom forms — sent to patients before their first appointment.",

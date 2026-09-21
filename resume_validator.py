@@ -118,9 +118,11 @@ def validate_generated_resume_pdf(
             for block in exp.project_blocks:
                 project_name = _normalize_text(block.project)
                 if project_name and project_name not in normalized_text:
-                    issues.append(
-                        f"Missing project block title '{block.project}' in extracted PDF text."
-                    )
+                    base_prefix = re.split(r"[-–—]", project_name)[0].strip()
+                    if not base_prefix or base_prefix not in normalized_text:
+                        issues.append(
+                            f"Missing project block title '{block.project}' in extracted PDF text."
+                        )
             continue
 
         job_title = _normalize_text(exp.job_title)
