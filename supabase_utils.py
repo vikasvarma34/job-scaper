@@ -1310,3 +1310,56 @@ def delete_saved_resume(resume_id: str) -> bool:
         logging.error(f"Error deleting saved resume {resume_id} from Supabase: {e}", exc_info=True)
         return False
 
+
+
+# Standalone cover letters: JSON only, independent of job-linked letters.
+def save_builder_cover_letter(company_name, file_name, cover_letter_data, record_id=None):
+    payload = dict(company_name=company_name, file_name=file_name, cover_letter_data=cover_letter_data)
+    table = supabase.table('saved_cover_letters')
+    query = table.update(payload).eq('id', record_id) if record_id else table.insert(payload)
+    result = query.execute()
+    return result.data[0] if result.data else None
+
+
+def list_builder_cover_letters():
+    return (supabase.table('saved_cover_letters')
+            .select('id, company_name, file_name, created_at, updated_at')
+            .order('created_at', desc=True).limit(50).execute().data or [])
+
+
+def get_builder_cover_letter(record_id):
+    result = supabase.table('saved_cover_letters').select('*').eq('id', record_id).limit(1).execute()
+    return result.data[0] if result.data else None
+
+
+def delete_builder_cover_letter(record_id):
+    return bool(supabase.table('saved_cover_letters').delete().eq('id', record_id).execute().data)
+
+
+
+def find_builder_cover_letter_conflicts(company_name, file_name, exclude_id=None):
+    """Exact, case-sensitive names; query the whole table, not the history list."""
+    query = (supabase.table('saved_cover_letters')
+             .select('id, company_name, file_name, updated_at')
+             .eq('company_name', company_name).eq('file_name', file_name))
+    if exclude_id:
+        query = query.neq('id', exclude_id)
+    return query.limit(2).execute().data or []
+
+
+def replace_builder_cover_letter(company_name, file_name, cover_letter_data, record_id, updated_at):
+    # Guard against a deleted, renamed, or edited replacement target.
+    result = (supabase.table('saved_cover_letters')
+              .update(dict(company_name=company_name, file_name=file_name, cover_letter_data=cover_letter_data))
+              .eq('id', record_id).eq('company_name', company_name).eq('file_name', file_name)
+              .eq('updated_at', updated_at).execute())
+    return result.data[0] if result.data else None
+
+
+
+def count_saved_documents(table_name):
+    """Exact database count, independent of the 50-row history display limit."""
+    result = supabase.table(table_name).select('id', count='exact', head=True).execute()
+    if result.count is None:
+        raise RuntimeError('Database did not return a saved-document count')
+    return result.count

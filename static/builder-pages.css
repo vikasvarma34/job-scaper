@@ -1,0 +1,123 @@
+/* Focused additions for the selection page and standalone cover letter editor.
+   Colors, dimensions, buttons and cards come from styles.css and builder.css. */
+.builder-icon {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  vertical-align: middle;
+}
+.cover-letter-page .btn-secondary,
+.cover-letter-page .modal-close-btn,
+.cover-letter-page .remove-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+.cover-letter-page .company-input { min-width: 220px; }
+.cover-letter-page .filename-input { flex: 1; min-width: 280px; }
+.cover-letter-page .action-buttons { flex-wrap: wrap; }
+.cover-letter-page .input-group { min-width: 0; }
+.cover-letter-page .styled-input,
+.cover-letter-page .styled-textarea { width: 100%; }
+.cover-letter-page .styled-textarea { min-height: 100px; line-height: 1.6; }
+.cover-letter-page .form-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.cover-letter-page .letter-fields .field-subject,
+.cover-letter-page .letter-fields .field-greeting { grid-column: 1 / -1; }
+.cover-letter-page .paragraph .input-group { margin-bottom: 10px; }
+.cover-letter-page .paragraph-label { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+.cover-letter-page .paragraph-label label { font-size: 0.9rem; font-weight: 700; }
+.cover-letter-page .paragraph .actions,
+.cover-letter-page .json-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.cover-letter-page .paragraph .actions { justify-content: flex-end; }
+.cover-letter-page .paragraph .btn-secondary { padding: 5px 10px; font-size: 0.8rem; }
+.cover-letter-page .card-title > .btn-secondary { padding: 5px 10px; font-size: 0.8rem; }
+.cover-letter-page #raw {
+  width: 100%; min-height: 650px; padding: 16px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.88rem; line-height: 1.5;
+  border-radius: var(--radius-sm); background: #1e293b; color: #f8fafc;
+  border: 1px solid #334155;
+}
+.cover-letter-page .tab-btn[aria-pressed="true"] { color: var(--accent); border-bottom-color: var(--accent); }
+.cover-letter-page #status { white-space: pre-wrap; font-size: 0.88rem; color: var(--teal); }
+.cover-letter-page #status:not(:empty) { margin: 0 0 16px; padding: 12px 16px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+.cover-letter-page #status.error { color: var(--danger); background: var(--danger-soft); }
+.editor-hint, .drawer-hint { color: var(--muted); font-size: 0.85rem; line-height: 1.6; }
+.editor-hint { margin: 0 0 16px; }
+.cover-letter-page dialog { padding: 0; color: var(--text); }
+.cover-letter-page dialog:not([open]) { display: none; }
+.cover-letter-page dialog::backdrop { background: rgba(15, 23, 42, 0.75); backdrop-filter: blur(4px); }
+.cover-letter-page #preview { max-height: 90vh; }
+.cover-letter-page #pdf-frame { flex: 1; min-height: 0; width: 100%; border: none; background: #334155; }
+.cover-letter-page .modal-controls .btn-download { padding: 5px 12px; font-size: 0.82rem; }
+.cover-letter-page .modal-input-group label { white-space: nowrap; }
+.cover-letter-page #saved { left: auto; right: 0; margin: 0; padding: 0; border: none; max-height: 100dvh; height: 100dvh; transform: none; }
+.cover-letter-page #saved::backdrop { background: rgba(0, 0, 0, 0.4); backdrop-filter: none; }
+.cover-letter-page .drawer-header h2 { font-size: 1.1rem; font-weight: 700; }
+.cover-letter-page .drawer-hint { margin: 12px 20px 0; }
+.cover-letter-page .saved-item { cursor: default; }
+.cover-letter-page button:disabled { opacity: 0.45; cursor: default; transform: none; }
+.cover-letter-page button:focus-visible,
+.cover-letter-page a:focus-visible,
+.builder-selection a:focus-visible { outline: 3px solid var(--accent); outline-offset: 4px; }
+.visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
+
+/* Selection cards use the same document surfaces, serif headings and accents. */
+.selection-container { padding-top: 56px; }
+.selection-intro { max-width: 660px; margin-bottom: 32px; }
+.selection-intro h2 { margin: 20px 0 14px; font-size: clamp(2rem, 4vw, 2.8rem); }
+.selection-intro p { color: var(--muted); line-height: 1.7; font-size: 1rem; margin: 0; }
+.selection-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px; }
+.selection-card { display: flex; align-items: flex-start; flex-direction: column; padding: 30px; margin: 0; transition: transform 0.18s, box-shadow 0.18s, border-color 0.18s; }
+.selection-card:hover { transform: translateY(-4px); border-color: var(--accent); box-shadow: var(--shadow-md); }
+.selection-icon { display: inline-flex; align-items: center; justify-content: center; width: 56px; height: 56px; border-radius: var(--radius-sm); background: var(--accent-soft); color: var(--accent); margin-bottom: 24px; }
+.selection-icon .builder-icon { width: 28px; height: 28px; }
+.selection-kicker { font-size: 0.75rem; font-weight: 700; letter-spacing: 0.07em; text-transform: uppercase; color: var(--muted-strong); margin-bottom: 10px; }
+.selection-card h2 { font-size: 1.65rem; }
+.selection-card p { line-height: 1.7; color: var(--muted); font-size: 0.95rem; margin: 14px 0 24px; }
+.selection-features { display: flex; flex-direction: column; gap: 10px; color: var(--muted-strong); font-size: 0.85rem; margin-bottom: 28px; }
+.selection-features span { display: flex; align-items: center; gap: 8px; }
+.selection-features span::before { content: ''; width: 5px; height: 5px; background: currentColor; border-radius: 50%; }
+.selection-action { display: flex; justify-content: space-between; align-items: center; gap: 12px; width: 100%; padding-top: 18px; margin-top: auto; border-top: 1px solid var(--line); color: var(--accent); font-size: 0.92rem; font-weight: 700; }
+.letter-card .selection-icon { background: var(--teal-soft); color: var(--teal); }
+.letter-card .selection-action { color: var(--teal); }
+.letter-card:hover { border-color: var(--teal); }
+.selection-note { color: var(--muted); text-align: center; font-size: 0.85rem; margin-top: 24px; }
+@media (max-width: 768px) {
+  .cover-letter-page .topbar-actions { flex-wrap: wrap; }
+  .cover-letter-page .form-row { grid-template-columns: minmax(0, 1fr); }
+  .cover-letter-page .action-buttons .btn-secondary { width: 100%; justify-content: center; }
+  .cover-letter-page #preview { max-height: 100dvh; height: 100dvh; }
+  .cover-letter-page .modal-controls .btn-download { width: auto; }
+  .cover-letter-page .modal-controls { justify-content: flex-start; gap: 10px; }
+  .cover-letter-page #raw { min-height: 65vh; }
+  .selection-container { padding-top: 30px; }
+  .selection-grid { grid-template-columns: minmax(0, 1fr); gap: 16px; }
+  .selection-card { padding: 24px; border-radius: var(--radius-md); }
+  .selection-intro { padding: 0 4px; margin-bottom: 24px; }
+  .selection-icon { margin-bottom: 18px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .selection-card { transition: none; }
+}
+/* Keep document names readable instead of shrinking them beside the actions. */
+.cover-letter-page .control-inputs { flex-basis: 100%; }
+.cover-letter-page #saved { background: var(--surface-strong); }
+
+.cover-letter-page #pdf-status {
+  margin: 16px 20px; padding: 14px 16px; border: 1px solid #fca5a5;
+  border-radius: 8px; background: #fff1f2; color: #9f1239; line-height: 1.6;
+}
+
+/* Shared #toast rules in builder.css match the existing resume notifications. */
+.cover-letter-page #toast { z-index: 9999; }
+.cover-letter-page .duplicate-dialog { max-width: min(540px, calc(100vw - 24px)); border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--surface-strong); box-shadow: var(--shadow-lg); }
+.cover-letter-page .duplicate-dialog h2 { font-size: 1.15rem; }
+.cover-letter-page .duplicate-content { padding: 8px 20px 20px; font-size: 0.92rem; line-height: 1.65; }
+.cover-letter-page .duplicate-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 20px; }
+
+/* Keep the resume-style notification visible above native preview/drawer dialogs. */
+.cover-letter-page #toast[popover] { inset: auto; left: 24px; bottom: 24px; margin: 0; border: none; max-width: min(560px, calc(100vw - 48px)); }
+@media (max-width: 768px) { .cover-letter-page #toast[popover] { left: 12px; right: 12px; bottom: 16px; max-width: none; } }
+.cover-letter-page #saved-open { display: inline-block; }

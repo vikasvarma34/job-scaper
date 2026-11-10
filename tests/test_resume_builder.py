@@ -24,7 +24,7 @@ class ResumeBuilderTests(unittest.TestCase):
             self.sample_resume = json.load(f)
 
     def test_resume_builder_page_renders_ok(self):
-        res = self.app.get("/builder")
+        res = self.app.get("/builder/resume")
         self.assertEqual(res.status_code, 200)
         self.assertIn(b"Resume Builder", res.data)
         self.assertIn(b"Structured Form", res.data)
@@ -108,8 +108,9 @@ class ResumeBuilderTests(unittest.TestCase):
         self.assertTrue(data.get("ok"))
         self.assertEqual(data["saved"]["company_name"], "Google")
 
+    @mock.patch("supabase_utils.count_saved_documents", return_value=137)
     @mock.patch("supabase_utils.list_saved_resumes")
-    def test_api_builder_list_resumes(self, mock_list):
+    def test_api_builder_list_resumes(self, mock_list, mock_count):
         mock_list.return_value = [
             {
                 "id": "123",
@@ -123,6 +124,7 @@ class ResumeBuilderTests(unittest.TestCase):
         data = res.get_json()
         self.assertTrue(data.get("ok"))
         self.assertEqual(len(data["resumes"]), 1)
+        self.assertEqual(data["total"], 137)
         self.assertEqual(data["resumes"][0]["company_name"], "Google")
 
     @mock.patch("supabase_utils.get_saved_resume")

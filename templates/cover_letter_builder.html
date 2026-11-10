@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Cover Letter Builder</title>
+  <link rel="stylesheet" href="/static/styles.css">
+  <link rel="stylesheet" href="/static/builder.css">
+  <link rel="stylesheet" href="/static/builder-pages.css">
+</head>
+<body class="cover-letter-page">
+  <header class="app-topbar">
+    <div class="brand-title"><h1>Cover Letter Builder</h1></div>
+    <nav class="topbar-actions" aria-label="Builder navigation">
+      <button type="button" id="saved-open" class="btn-secondary">📁 Saved Cover Letters (<span id="saved-count">…</span>)</button>
+      <a class="secondary-button link-button" href="/builder">Builder Selection</a>
+      <a class="secondary-button link-button" href="/">Exit to Dashboard</a>
+    </nav>
+  </header>
+  <main class="builder-container">
+    <section class="control-panel" aria-label="Document actions">
+      <div class="control-inputs">
+        <div class="input-group company-input"><label for="company">Target Company</label><input id="company" class="styled-input" placeholder="e.g. Google, TELUS"></div>
+        <div class="input-group filename-input"><label for="filename">Output PDF Name</label><input id="filename" class="styled-input" placeholder="Your_Name_Company_Cover_Letter.pdf"></div>
+      </div>
+      <div class="action-buttons">
+        <button type="button" id="preview-open" class="btn-preview"><svg class="builder-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg>Preview Cover Letter</button>
+        <button type="button" id="download" class="btn-download"><svg class="builder-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m-5-5 5 5 5-5M4 16v4h16v-4"/></svg>Download Cover Letter</button>
+        <button type="button" id="save" class="btn-save"><svg class="builder-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 3 6 6v12H3V3zM7 3v6h8V3M7 21v-8h10v8"/></svg>Save to DB</button>
+        <button type="button" id="reset" class="btn-secondary"><svg class="builder-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 10a9 9 0 1 1 2 8M3 4v6h6"/></svg>Reset</button>
+      </div>
+    </section>
+    <div id="status" role="status" aria-live="polite"></div>
+    <div class="tabs-bar" aria-label="Editor views">
+      <button type="button" id="form-tab" class="tab-btn" aria-pressed="true">Structured Form</button>
+      <button type="button" id="json-tab" class="tab-btn" aria-pressed="false">Raw JSON</button>
+    </div>
+    <div id="form-view">
+      <section class="section-card"><div class="card-title"><h2><span class="card-num">1</span> Applicant & Contact Information</h2></div><div id="applicant-fields" class="form-row"></div></section>
+      <section class="section-card"><div class="card-title"><h2><span class="card-num">2</span> Recipient Details</h2></div><div id="recipient-fields" class="form-row"></div></section>
+      <section class="section-card"><div class="card-title"><h2><span class="card-num">3</span> Letter Details</h2></div><div id="letter-fields" class="form-row letter-fields"></div></section>
+      <section class="section-card"><div class="card-title"><h2><span class="card-num">4</span> Letter Paragraphs</h2><button type="button" id="add-paragraph" class="btn-secondary"><svg class="builder-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>Add Paragraph</button></div><div id="paragraphs"></div></section>
+    </div>
+    <section id="json-view" class="section-card" hidden>
+      <div class="card-title"><h2>Raw Cover Letter JSON</h2><div class="json-actions"><button type="button" id="format-json" class="btn-secondary"><svg class="builder-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m8 7-5 5 5 5m8-10 5 5-5 5m-2-14-4 18"/></svg>Format JSON</button><button type="button" id="copy-json" class="btn-secondary"><svg class="builder-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="13" height="13" rx="2"/><path d="M16 8V3H3v13h5"/></svg>Copy JSON</button></div></div>
+      <p class="editor-hint">Copy this document into ChatGPT, edit it, then paste the complete JSON back here. Keep the same field names.</p>
+      <label class="visually-hidden" for="raw">Document JSON</label><textarea id="raw" spellcheck="false"></textarea>
+    </section>
+    <p class="editor-hint">Save to DB keeps your edits. Preview and download create a PDF without saving a record.</p>
+  </main>
+  <dialog id="preview" class="pdf-modal" aria-labelledby="preview-title">
+    <div class="modal-topbar"><div class="modal-title" id="preview-title"><svg class="builder-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M8 12h8M8 16h8M8 8h2"/></svg> Cover Letter Preview</div>
+      <div class="modal-controls">
+        <div class="modal-input-group"><label for="vertical-margin">Top/Bottom:</label><select id="vertical-margin" class="modal-select"><option value="0.5">0.5 in (Tight)</option><option value="0.75" selected>0.75 in (Standard)</option><option value="1">1 in (Spacious)</option></select></div>
+        <div class="modal-input-group"><label for="side-margin">Sides:</label><select id="side-margin" class="modal-select"><option value="0.5">0.5 in (Wide)</option><option value="0.75" selected>0.75 in (Standard)</option><option value="1">1 in (Narrow)</option></select></div>
+        <div class="modal-input-group"><label for="font-size">Font Size:</label><select id="font-size" class="modal-select"><option value="11">11 pt</option><option value="11.5" selected>11.5 pt</option><option value="12">12 pt</option><option value="13">13 pt</option><option value="14">14 pt</option></select></div>
+        <button type="button" id="preview-refresh" class="modal-close-btn"><svg class="builder-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 10a9 9 0 1 1 2 8M3 4v6h6"/></svg>Refresh Preview</button>
+        <button type="button" id="preview-download" class="btn-download"><svg class="builder-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m-5-5 5 5 5-5M4 16v4h16v-4"/></svg>Download Cover Letter</button>
+        <button type="button" id="preview-close" class="modal-close-btn"><svg class="builder-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>Close</button>
+      </div>
+    </div>
+    <div id="pdf-status" role="status" aria-live="polite" hidden></div>
+    <iframe id="pdf-frame" title="Cover letter PDF preview"></iframe>
+  </dialog>
+  <dialog id="saved" class="drawer-panel" aria-labelledby="saved-title">
+    <div class="drawer-header"><h2 id="saved-title">Saved Cover Letters</h2><button type="button" id="saved-close" class="remove-btn"><svg class="builder-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>Close</button></div>
+    <p class="drawer-hint">Your most recent 50 letters. Saving a loaded letter updates it.</p>
+    <div id="saved-list" class="drawer-list"></div>
+  </dialog>
+  <dialog id="duplicate-dialog" class="duplicate-dialog" aria-labelledby="duplicate-title">
+    <div class="drawer-header"><h2 id="duplicate-title">Cover letter already exists</h2></div>
+    <div class="duplicate-content"><p id="duplicate-message"></p>
+      <p>Replace Existing updates that saved letter. If you were editing a different saved letter, its original record is kept.</p>
+      <div class="duplicate-actions">
+        <button type="button" id="duplicate-replace" class="btn-save">Replace Existing</button>
+        <button type="button" id="duplicate-rename" class="btn-secondary">Change Filename</button>
+        <button type="button" id="duplicate-cancel" class="btn-secondary">Cancel</button>
+      </div>
+    </div>
+  </dialog>
+  <div id="toast" popover="manual" role="status" aria-live="polite"></div>
+  <script src="/static/cover_letter_builder.js"></script>
+</body>
+</html>

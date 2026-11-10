@@ -1,0 +1,26 @@
+{
+  "applicant": {
+    "name": "Vikas Varma Pokala",
+    "email": "",
+    "phone": "",
+    "location": "",
+    "linkedin": "",
+    "portfolio": ""
+  },
+  "date": "2026-11-10",
+  "recipient": {
+    "company": "",
+    "name": "Hiring Manager",
+    "job_title": "",
+    "address": ""
+  },
+  "subject": "Application for Software Developer",
+  "greeting": "Dear Hiring Manager,",
+  "paragraphs": [
+    "I am writing to express my interest in the Software Developer position at your company.",
+    "My experience building web applications has helped me develop practical engineering and collaboration skills. I would welcome the opportunity to contribute to your team.",
+    "Thank you for considering my application. I look forward to discussing how my experience aligns with your needs."
+  ],
+  "closing": "Sincerely,",
+  "signature": "Vikas Varma Pokala"
+}

@@ -16,7 +16,8 @@ import config
 import custom_resume_generator
 import pdf_generator
 import supabase_utils
-from cover_letter_pdf import create_cover_letter_pdf
+from cover_letter_pdf import create_cover_letter_pdf, create_builder_cover_letter_pdf, CoverLetterPageLimitError
+from cover_letter_model import validate_cover_letter
 from models import ResumeLike, is_resume_v2_model, parse_resume_data, parse_resume_json_text
 
 
@@ -1268,6 +1269,11 @@ def run_action():
 # --- Dedicated Resume Builder Endpoints ---
 
 @app.get("/builder")
+def builder_selection_page():
+    return render_template("builder_selection.html")
+
+
+@app.get("/builder/resume")
 def resume_builder_page():
     """
     Renders the dedicated Resume Builder interface.
@@ -1406,7 +1412,12 @@ def api_builder_list_resumes():
     Returns list of saved resumes with metadata (id, company, file_name, timestamps).
     """
     resumes = supabase_utils.list_saved_resumes()
-    return jsonify({"ok": True, "resumes": resumes})
+    try:
+        total = supabase_utils.count_saved_documents(getattr(config, "SUPABASE_SAVED_RESUMES_TABLE_NAME", "saved_resumes"))
+        return jsonify({"ok": True, "resumes": resumes, "total": total})
+    except Exception:
+        logging.exception('Saved resume count failed')
+        return jsonify(ok=False, error='Could not load the saved resume count'), 500
 
 
 @app.get("/api/builder/resumes/<resume_id>")
@@ -1429,6 +1440,133 @@ def api_builder_delete_saved_resume(resume_id: str):
     if not success:
         return jsonify({"ok": False, "error": "Failed to delete saved resume."}), 500
     return jsonify({"ok": True})
+
+
+# --- Standalone Cover Letter Builder ---
+@app.get('/builder/cover-letter')
+def cover_letter_builder_page():
+    return render_template('cover_letter_builder.html')
+
+
+@app.get('/api/builder/cover-letter/base')
+def api_cover_letter_base():
+    data = json.loads((ROOT_DIR / 'cover_letter_builder.json').read_text(encoding='utf-8'))
+    from zoneinfo import ZoneInfo
+    data['date'] = datetime.now(ZoneInfo('Asia/Kolkata')).date().isoformat()
+    response = jsonify(ok=True, cover_letter=validate_cover_letter(data))
+    response.headers['Cache-Control'] = 'no-store'
+    return response
+
+
+def _cover_letter_payload():
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        raise ValueError('Request must be a JSON object')
+    data = validate_cover_letter(body.get('cover_letter_data'))
+    return body, data
+
+
+@app.post('/api/builder/cover-letter/pdf')
+def api_cover_letter_pdf():
+    try:
+        body, data = _cover_letter_payload()
+        layout = {key: body[key] for key in ('font_size', 'top_margin', 'bottom_margin', 'side_margin') if key in body}
+        pdf = create_builder_cover_letter_pdf(data, **layout)
+        requested_name = str(body.get('file_name') or f"{data['applicant']['name']}_Cover_Letter")
+        stem = requested_name[:-4] if requested_name.lower().endswith('.pdf') else requested_name
+        filename = _sanitize_filename_token(stem, default='Cover_Letter') + '.pdf'
+        return send_file(io.BytesIO(pdf), mimetype='application/pdf',
+                         as_attachment=not (request.args.get('preview') == 'true' or body.get('preview') is True),
+                         download_name=filename)
+    except CoverLetterPageLimitError as exc:
+        return jsonify(ok=False, error=str(exc), page_count=exc.page_count), 422
+    except (ValueError, TypeError, OverflowError) as exc:
+        return jsonify(ok=False, error=str(exc)), 400
+
+
+@app.post('/api/builder/cover-letter/save')
+def api_cover_letter_save():
+    try:
+        body, data = _cover_letter_payload()
+        company = data['recipient'].get('company', '').strip()
+        filename = body.get('file_name')
+        if not company or not isinstance(filename, str) or not filename.strip():
+            raise ValueError('Recipient company and file name are required')
+        filename = filename.strip()
+        record_id = str(uuid.UUID(str(body['id']))) if body.get('id') else None
+        replace_id = str(uuid.UUID(str(body['replace_id']))) if body.get('replace_id') else None
+        expected_updated_at = body.get('replace_updated_at')
+        if replace_id and (not isinstance(expected_updated_at, str) or not expected_updated_at):
+            raise ValueError('Replacement requires the existing record version. Please save again.')
+    except (ValueError, TypeError) as exc:
+        return jsonify(ok=False, error=str(exc)), 400
+    try:
+        if record_id and not supabase_utils.get_builder_cover_letter(record_id):
+            return jsonify(ok=False, code='stale_record', error=
+                           'This saved cover letter no longer exists. Your edits are intact. Save again to create a new record.'), 404
+        conflicts = supabase_utils.find_builder_cover_letter_conflicts(company, filename, record_id)
+        if len(conflicts) > 1:
+            return jsonify(ok=False, code='ambiguous_duplicate', error=
+                           'Multiple saved letters already use this company and filename. Please choose a different filename.'), 409
+        conflict = conflicts[0] if conflicts else None
+        if conflict and not replace_id:
+            return jsonify(ok=False, code='duplicate_document', error=
+                           'A cover letter with this Target Company and Output PDF Filename already exists.',
+                           conflict=conflict), 409
+        if replace_id:
+            if not conflict or str(conflict['id']) != replace_id or conflict.get('updated_at') != expected_updated_at:
+                return jsonify(ok=False, code='replacement_changed', error=
+                               'The existing letter changed or was deleted. Your edits are intact. Save again to review the current conflict.'), 409
+            saved = supabase_utils.replace_builder_cover_letter(company, filename, data, replace_id, expected_updated_at)
+            if not saved:
+                return jsonify(ok=False, code='replacement_changed', error=
+                               'The existing letter changed or was deleted. Nothing was replaced. Please save again.'), 409
+            action = 'updated'
+        else:
+            saved = supabase_utils.save_builder_cover_letter(company, filename, data, record_id)
+            action = 'updated' if record_id else 'created'
+            if not saved:
+                if record_id:
+                    return jsonify(ok=False, code='stale_record', error=
+                                   'This saved cover letter no longer exists. Your edits are intact. Save again to create a new record.'), 404
+                return jsonify(ok=False, error='The database did not confirm the save. Your edits are intact. Please try again.'), 500
+        return jsonify(ok=True, saved=saved, action=action)
+    except Exception as exc:
+        if getattr(exc, 'code', None) == '23505':
+            return jsonify(ok=False, code='duplicate_race', error=
+                           'Another letter was saved with this company and filename. Your edits are intact. Please save again to review it.'), 409
+        logging.exception('Cover letter save failed')
+        return jsonify(ok=False, error='Could not save cover letter. Your edits are intact. Please retry; if it continues, check the database migration and server logs.'), 500
+
+
+@app.get('/api/builder/cover-letter/saved')
+def api_cover_letter_list():
+    try:
+        return jsonify(ok=True, cover_letters=supabase_utils.list_builder_cover_letters(),
+                       total=supabase_utils.count_saved_documents('saved_cover_letters'))
+    except Exception:
+        logging.exception('Cover letter list failed')
+        return jsonify(ok=False, error='Could not load saved cover letters. Check the database migration.'), 500
+
+
+@app.route('/api/builder/cover-letter/saved/<record_id>', methods=['GET', 'DELETE'])
+def api_cover_letter_record(record_id):
+    try:
+        record_id = str(uuid.UUID(record_id))
+    except ValueError:
+        return jsonify(ok=False, error='Invalid cover letter ID'), 400
+    try:
+        if request.method == 'DELETE':
+            if not supabase_utils.delete_builder_cover_letter(record_id):
+                return jsonify(ok=False, error='Cover letter not found'), 404
+            return jsonify(ok=True)
+        record = supabase_utils.get_builder_cover_letter(record_id)
+        if not record:
+            return jsonify(ok=False, error='Cover letter not found'), 404
+        return jsonify(ok=True, cover_letter=record)
+    except Exception:
+        logging.exception('Cover letter record operation failed')
+        return jsonify(ok=False, error='Could not access saved cover letter'), 500
 
 
 if __name__ == "__main__":
