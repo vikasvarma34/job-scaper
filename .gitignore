@@ -4,3 +4,4 @@ __pycache__/
 resume.pdf
 verify_pdf.py
 test_resume.pdf
+.vscode/
